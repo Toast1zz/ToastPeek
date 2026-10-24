@@ -1,5 +1,8 @@
 # ToastPeek
 
+> [!WARNING]
+> ToastPeek is at an early stage. Expect bugs, crashes and breaking changes between versions, and keep a backup of anything important. Bug reports and pull requests are welcome.
+
 ToastPeek is a macOS web browser with a vertical tab sidebar and Spaces. The interface is SwiftUI and AppKit; pages are rendered by the system WebKit engine (`WKWebView`).
 
 ## Features
