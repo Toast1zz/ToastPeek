@@ -8,6 +8,7 @@ These notes cover things that are not obvious from the code.
 - `scripts/test.sh` runs the unit tests, which cover only the engine-independent logic. `scripts/l10n_missing.py` lists UI strings that have no zh-Hans translation.
 - XcodeGen generates the project from `ToastPeek/project.yml`. The `.xcodeproj` is not committed.
 - Signing is ad-hoc unless `ToastPeek/config/Local.xcconfig` sets an identity. Builds are not notarized.
+- Release builds are universal (arm64 + x86_64). Debug builds are arm64 only, to keep everyday builds fast.
 
 ## Data locations
 

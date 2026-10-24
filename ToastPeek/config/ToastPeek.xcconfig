@@ -17,8 +17,11 @@ CODE_SIGN_STYLE = Manual
 DEVELOPMENT_TEAM =
 ENABLE_HARDENED_RUNTIME = YES
 
-// arm64 only.
+// Debug builds are arm64 only (faster); Release is universal (arm64 + x86_64).
 ARCHS = arm64
+ARCHS[config=Release] = arm64 x86_64
+ONLY_ACTIVE_ARCH = YES
+ONLY_ACTIVE_ARCH[config=Release] = NO
 MACOSX_DEPLOYMENT_TARGET = 14.0
 
 #include? "Local.xcconfig"

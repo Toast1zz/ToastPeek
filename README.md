@@ -15,14 +15,14 @@ ToastPeek also includes a PDF viewer, a Library (downloads, media, archived tabs
 
 ## Requirements
 
-- macOS 14.0 or later
-- Apple silicon (arm64). There is no Intel build.
+- macOS 14.0 or later.
+- A Mac with Apple silicon or an Intel processor. Release builds are universal (arm64 + x86_64). The Intel code has been checked only under Rosetta on an Apple silicon Mac, not on an Intel Mac.
 
 ## Install
 
-1. Download `ToastPeek-<version>-arm64.zip` from [Releases](../../releases) and unzip it.
+1. Download `ToastPeek-<version>-universal.zip` from the [latest release](../../releases/latest) and unzip it.
 2. Move `ToastPeek.app` to `/Applications`.
-3. The app is ad-hoc signed and not notarized, so Gatekeeper blocks the first launch. Right-click the app and choose **Open**, or run:
+3. The app is ad-hoc signed and not notarized, so Gatekeeper blocks the first launch. On macOS 14, right-click the app and choose **Open**. On macOS 15 and later, try to open it once, then click **Open Anyway** in System Settings > Privacy & Security. Alternatively, run:
 
    ```bash
    xattr -dr com.apple.quarantine /Applications/ToastPeek.app
@@ -45,7 +45,8 @@ The trade-off is that Chrome extensions do not work in ToastPeek, and the app do
 - No picture-in-picture. macOS `WKWebView` has no public API for it.
 - No password manager and no sync.
 - Rendering and media support follow the installed macOS version of WebKit.
-- The release build is ad-hoc signed and not notarized.
+- Release builds are ad-hoc signed and not notarized.
+- The Intel (x86_64) code has not been tested on an Intel Mac.
 
 ## Build from source
 
@@ -54,11 +55,11 @@ Requirements: Xcode (developed with Xcode 27) and [XcodeGen](https://github.com/
 ```bash
 git clone https://github.com/Toast1zz/ToastPeek.git
 cd ToastPeek
-scripts/build.sh release     # Release build
+scripts/build.sh release     # universal Release build
 scripts/test.sh              # unit tests
 ```
 
-`scripts/build.sh` generates `ToastPeek/ToastPeek.xcodeproj` from `ToastPeek/project.yml` and builds into `~/Developer/Builds/ToastPeek`. To use a different folder, set `TOASTPEEK_BUILD_DIR`. The app is written to `DerivedData/Build/Products/<Config>/ToastPeek.app` under that folder. `scripts/build.sh` with no argument makes a Debug build, and `scripts/build.sh install` copies the Release build to `/Applications`. If ToastPeek is running, the install step quits it first.
+`scripts/build.sh` generates `ToastPeek/ToastPeek.xcodeproj` from `ToastPeek/project.yml` and builds into `~/Developer/Builds/ToastPeek`. To use a different folder, set `TOASTPEEK_BUILD_DIR`. The app is written to `DerivedData/Build/Products/<Config>/ToastPeek.app` under that folder. `scripts/build.sh` with no argument makes an arm64-only Debug build. `scripts/build.sh release` makes a universal Release build. `scripts/build.sh install` also copies the Release build to `/Applications`, and quits a running ToastPeek first.
 
 Builds are ad-hoc signed by default. To sign with your own Apple Development certificate, copy `ToastPeek/config/Local.xcconfig.example` to `ToastPeek/config/Local.xcconfig` and fill in your identity and team ID. Git ignores that file. A stable identity keeps keychain items trusted across rebuilds.
 
