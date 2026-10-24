@@ -1,0 +1,24 @@
+// ToastPeek.xcconfig: shared build settings for every target (project.yml).
+
+CLANG_CXX_LANGUAGE_STANDARD = c++20
+CLANG_CXX_LIBRARY = libc++
+
+// Entitlements: camera and microphone only. Page JavaScript runs in system
+// WebKit processes, so the app itself needs no JIT entitlement.
+CODE_SIGN_ENTITLEMENTS = config/ToastPeek.entitlements
+
+// Signing: ad-hoc by default, so anyone can build without an Apple
+// developer account. To sign with your own certificate, copy
+// Local.xcconfig.example to Local.xcconfig (untracked) and fill it in.
+// A stable identity keeps keychain items trusted across rebuilds; ad-hoc
+// signing changes the code identity on every build.
+CODE_SIGN_IDENTITY = -
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM =
+ENABLE_HARDENED_RUNTIME = YES
+
+// arm64 only.
+ARCHS = arm64
+MACOSX_DEPLOYMENT_TARGET = 14.0
+
+#include? "Local.xcconfig"

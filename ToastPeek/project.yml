@@ -1,0 +1,83 @@
+# ToastPeek.xcodeproj — generated with XcodeGen (https://github.com/yonaskolb/XcodeGen)
+# Regenerate:  cd ToastPeek && xcodegen generate
+# This spec is the source of truth; the generated .xcodeproj is gitignored.
+#
+# Signing lives in config/ToastPeek.xcconfig (ad-hoc by default) and an
+# optional, untracked config/Local.xcconfig (see Local.xcconfig.example).
+#
+# Targets:
+#   ToastPeek        — SwiftUI app hosted in AppKit windows. Entry point is
+#                  Sources/ToastPeek/main.swift. Engine is WKWebView.
+#   ToastPeekTests   — unit tests for the engine-independent logic (state file,
+#                  permissions, page-open policy, import parsing).
+#                  Run: scripts/test.sh
+name: ToastPeek
+options:
+  bundleIdPrefix: app.toastpeek
+  developmentLanguage: en
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: config/ToastPeek.xcconfig
+  Release: config/ToastPeek.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_EMIT_LOC_STRINGS: YES
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+  configs:
+    # Development signing adds get-task-allow (debugger attach). Keep it out
+    # of Release builds.
+    Release:
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+targets:
+  ToastPeek:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/ToastPeek
+      - path: Resources
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.toastpeek.mac
+        # libsqlite3 for the browser History importer (Models/HistoryImport.swift)
+        OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+        INFOPLIST_FILE: config/ToastPeek-Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: config/ToastPeek.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+  ToastPeekTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Sources/ToastPeek/Core
+      - path: Sources/ToastPeek/Models/BrowserModels.swift
+      - path: Sources/ToastPeek/Boosts/Boost.swift
+      - path: Tests/ToastPeekTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.toastpeek.mac.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: ""
+        ENABLE_HARDENED_RUNTIME: NO
+schemes:
+  ToastPeekTests:
+    build:
+      targets:
+        ToastPeekTests: [test]
+    test:
+      config: Debug
+      targets:
+        - ToastPeekTests
+  ToastPeek:
+    build:
+      targets:
+        ToastPeek: all
+    run:
+      config: Debug
+    archive:
+      config: Release

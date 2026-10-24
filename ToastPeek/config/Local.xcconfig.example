@@ -1,0 +1,5 @@
+// Copy to Local.xcconfig (same folder; it is gitignored) to sign with your
+// own certificate instead of ad-hoc. Find your identity with:
+//   security find-identity -v -p codesigning
+CODE_SIGN_IDENTITY = Apple Development: Your Name (XXXXXXXXXX)
+DEVELOPMENT_TEAM = YOURTEAMID

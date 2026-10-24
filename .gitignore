@@ -1,0 +1,10 @@
+.DS_Store
+**/.build/
+build/
+dist/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+ToastPeek/ToastPeek.xcodeproj/
+ToastPeek/config/Local.xcconfig
+*.zip
