@@ -35,7 +35,8 @@ for variant in "${variants[@]}"; do
   if [[ "$variant" == arm64 ]]; then
     [[ "$actual_archs" == arm64 ]] || { echo "Unexpected arm64 binary: $actual_archs" >&2; exit 1; }
   else
-    lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/ToastPeek"
+    [[ "$actual_archs" == "arm64 x86_64" || "$actual_archs" == "x86_64 arm64" ]] \
+      || { echo "Unexpected universal binary: $actual_archs" >&2; exit 1; }
   fi
   TOASTPEEK_DERIVED_DATA="$build_dir/DerivedData" python3 "$ROOT/scripts/l10n_missing.py" Release
   archive="$RELEASE_DIR/ToastPeek-$VERSION-$variant.zip"
