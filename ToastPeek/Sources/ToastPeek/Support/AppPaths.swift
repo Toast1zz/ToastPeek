@@ -2,6 +2,13 @@ import Foundation
 
 /// On-disk locations, plus the one-time move from the app's old name.
 enum AppPaths {
+    private static var dataDirectoryName: String {
+        #if DEBUG
+        return "ToastPeek-Development"
+        #else
+        return "ToastPeek"
+        #endif
+    }
     static let support: URL = {
         #if DEBUG
         // Test builds can run hermetically against a scratch data dir
@@ -15,7 +22,7 @@ enum AppPaths {
         #endif
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let dir = base.appendingPathComponent("ToastPeek", isDirectory: true)
+        let dir = base.appendingPathComponent(dataDirectoryName, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
@@ -27,10 +34,14 @@ enum AppPaths {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             return dir
         }
-        #endif
+        let dir = support.appendingPathComponent("Logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+        #else
         let dir = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Logs/ToastPeek", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+        #endif
     }()
 }

@@ -13,6 +13,16 @@ final class ImportAndBoostTests: XCTestCase {
         XCTAssertFalse(Boost(name: "empty", hostPattern: "").matches(host: "github.com"))
     }
 
+    func testAddressResolutionPreservesExplicitDocumentsAndUsesSecureDomains() {
+        XCTAssertEqual(URLResolver.resolve("1password.com")?.scheme, "https")
+        XCTAssertEqual(URLResolver.resolve("localhost.example.com")?.scheme, "https")
+        XCTAssertEqual(URLResolver.resolve("localhost:8080")?.absoluteString, "http://localhost:8080")
+        XCTAssertEqual(URLResolver.resolve("[::1]:8080")?.absoluteString, "http://[::1]:8080")
+        XCTAssertEqual(URLResolver.resolve("data:text/html,<h1>Hello world</h1>")?.scheme, "data")
+        XCTAssertEqual(URLResolver.resolve("chrome://settings")?.scheme, "chrome")
+        XCTAssertEqual(URLResolver.resolve("ordinary search words")?.host, "www.google.com")
+    }
+
     func testSearchQueryEncoding() throws {
         let url = try XCTUnwrap(URLResolver.searchURL(for: "a&b=c #1 +x", engine: .google))
         let item = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }

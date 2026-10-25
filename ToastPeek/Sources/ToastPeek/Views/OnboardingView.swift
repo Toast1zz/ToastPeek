@@ -278,7 +278,8 @@ struct OnboardingView: View {
             let payload = ImportSources.read(source)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if payload.history.isEmpty && !source.hasData {
+                    if let error = payload.errors.first { store.toast = error }
+                    if payload.history.isEmpty && (!source.hasData || !payload.errors.isEmpty) {
                         states[source.id] = .failed
                         return
                     }
@@ -290,7 +291,8 @@ struct OnboardingView: View {
     }
 
     private func importHistoryFile() {
-        if let (added, found) = ImportPanels.importHistory(into: store) {
+        ImportPanels.beginImportHistory(into: store) { result in
+            guard let (added, found) = result else { return }
             fileMessage = found == 0 ? String(localized: "No history found in that file.")
                 : String(localized: "History entries imported: \(added)")
         }

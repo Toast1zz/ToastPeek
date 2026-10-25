@@ -14,11 +14,13 @@ struct PeekWindowView: View {
     @State private var spaceMenuOpen = false
     @FocusState private var addressFocused: Bool
 
-    init(url: URL?, onClose: @escaping () -> Void, onMoveToSpace: @escaping (BrowserTab, UUID) -> Void) {
+    init(url: URL?, profileSpace: BrowserSpace? = nil, onClose: @escaping () -> Void, onMoveToSpace: @escaping (BrowserTab, UUID) -> Void) {
         self.onClose = onClose
         self.onMoveToSpace = onMoveToSpace
-        _tab = State(initialValue: BrowserTab(spaceID: nil, kind: .today, title: "",
-                                              urlString: url?.absoluteString ?? "about:blank"))
+        var initial = BrowserTab(spaceID: profileSpace?.id, kind: .today, title: "",
+                                 urlString: url?.absoluteString ?? "about:blank")
+        initial.profileID = profileSpace?.dataStoreID
+        _tab = State(initialValue: initial)
         _editing = State(initialValue: url == nil)
     }
 

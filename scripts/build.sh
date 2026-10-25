@@ -17,20 +17,31 @@ xcodebuild -project ToastPeek.xcodeproj -scheme ToastPeek -configuration "$CONFI
   -derivedDataPath "$OUT/DerivedData" build > "$OUT/build.log" 2>&1
 code=$?
 set -e
-grep -E "error:|warning: .*ToastPeek/" "$OUT/build.log" | sort -u | head -60 || true
+rg "(^|[[:space:]])(error|warning):" "$OUT/build.log" | sort -u | head -60 || true
 if [ $code -ne 0 ]; then echo "BUILD FAILED (see $OUT/build.log)"; exit $code; fi
 APP="$OUT/DerivedData/Build/Products/$CONFIG/ToastPeek.app"
 codesign --verify --deep --strict "$APP"
 echo "BUILT $APP"
 if [[ "${1:-}" == "install" ]]; then
-  # Quit like Cmd+Q so Spaces and tabs are saved and the engine shuts down
-  # cleanly. SIGTERM is handled the same way by the app (main.swift).
-  if pgrep -x ToastPeek >/dev/null; then
-    osascript -e 'tell application id "app.toastpeek.mac" to quit' >/dev/null 2>&1 || pkill -TERM -x ToastPeek || true
-    for _ in $(seq 1 75); do pgrep -x ToastPeek >/dev/null || break; sleep 0.2; done
-    if pgrep -x ToastPeek >/dev/null; then echo "ToastPeek is still running; quit it and re-run." >&2; exit 1; fi
+  # Stop only the installed bundle, rather than every process named ToastPeek.
+  # The app handles SIGTERM through its normal save/quit path.
+  installed_pids="$(ps -axo pid=,comm= | awk '$2 == "/Applications/ToastPeek.app/Contents/MacOS/ToastPeek" { print $1 }')"
+  if [[ -n "$installed_pids" ]]; then
+    kill -TERM $installed_pids
+    for _ in $(seq 1 75); do
+      alive=0
+      for pid in $installed_pids; do kill -0 "$pid" 2>/dev/null && alive=1; done
+      [[ $alive -eq 0 ]] && break
+      sleep 0.2
+    done
+    if [[ $alive -ne 0 ]]; then echo "The installed browser has not finished saving; installation stopped." >&2; exit 1; fi
   fi
-  rm -rf /Applications/ToastPeek.app
-  cp -R "$APP" /Applications/ToastPeek.app
-  echo "INSTALLED /Applications/ToastPeek.app"
+  staged="/Applications/.ToastPeek-install-$$.app"
+  ditto "$APP" "$staged"
+  codesign --verify --deep --strict "$staged"
+  if [[ -e /Applications/ToastPeek.app ]]; then
+    mv /Applications/ToastPeek.app "/Applications/ToastPeek-backup-$(date +%Y%m%d-%H%M%S)-$$.app"
+  fi
+  mv "$staged" /Applications/ToastPeek.app
+  echo "INSTALLED /Applications/ToastPeek.app (previous bundle preserved)"
 fi

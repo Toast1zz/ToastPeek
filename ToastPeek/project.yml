@@ -50,6 +50,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: config/ToastPeek.entitlements
         ENABLE_HARDENED_RUNTIME: YES
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: app.toastpeek.mac.debug
   ToastPeekTests:
     type: bundle.unit-test
     platform: macOS
@@ -64,7 +67,31 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: ""
         ENABLE_HARDENED_RUNTIME: NO
+  ToastPeekIntegrationTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Sources/ToastPeek
+        excludes:
+          - main.swift
+          - Support/Automation.swift
+      - path: Tests/ToastPeekIntegrationTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.toastpeek.mac.integration-tests
+        OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: ""
+        ENABLE_HARDENED_RUNTIME: NO
 schemes:
+  ToastPeekIntegrationTests:
+    build:
+      targets:
+        ToastPeekIntegrationTests: [test]
+    test:
+      config: Debug
+      targets:
+        - ToastPeekIntegrationTests
   ToastPeekTests:
     build:
       targets:

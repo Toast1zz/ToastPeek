@@ -37,6 +37,9 @@ final class ShortcutStore: ObservableObject {
     /// Called for every menu item `installMenus` builds; returns what the item should use.
     func resolve(_ action: Selector, key: String, mods: NSEvent.ModifierFlags) -> (String, NSEvent.ModifierFlags) {
         let id = NSStringFromSelector(action)
+        if let primary = defaults[id], primary != Binding(key: key, mods: mods.rawValue) {
+            return (key, mods)
+        }
         defaults[id] = Binding(key: key, mods: mods.rawValue)
         if let o = overrides[id] { return (o.key, o.flags) }
         return (key, mods)
@@ -86,11 +89,13 @@ final class ShortcutStore: ObservableObject {
     }
 
     func apply() {
+        var seen = Set<String>()
         func walk(_ menu: NSMenu) {
             for item in menu.items {
                 if let sub = item.submenu { walk(sub); continue }
                 guard let action = item.action, !item.isHidden, item.tag == 0 else { continue }
                 let id = NSStringFromSelector(action)
+                guard seen.insert(id).inserted else { continue }
                 guard let base = defaults[id], !Self.excluded.contains(id) else { continue }
                 let b = overrides[id] ?? base
                 item.keyEquivalent = b.key

@@ -114,9 +114,12 @@ struct SidebarRevealTracker: NSViewRepresentable {
             }
             #if DEBUG
             probeObserver = NotificationCenter.default.addObserver(forName: Self.probePoint, object: nil, queue: .main) { [weak self] note in
-                guard let self, let w = self.window, note.object as? NSWindow === w,
-                      let p = note.userInfo?["point"] as? NSPoint else { return }
-                self.evaluate(p)
+                let source = note.object as? NSWindow
+                let point = note.userInfo?["point"] as? NSPoint
+                MainActor.assumeIsolated {
+                    guard let self, let w = self.window, source === w, let point else { return }
+                    self.evaluate(point)
+                }
             }
             #endif
         }
@@ -129,7 +132,12 @@ struct SidebarRevealTracker: NSViewRepresentable {
         #endif
 
         deinit {
-            if let monitor { NSEvent.removeMonitor(monitor) }
+            MainActor.assumeIsolated {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                #if DEBUG
+                if let probeObserver { NotificationCenter.default.removeObserver(probeObserver) }
+                #endif
+            }
         }
 
         func cancelHide() {
@@ -167,6 +175,7 @@ struct SidebarRevealTracker: NSViewRepresentable {
 /// Puts the window's traffic lights on the sidebar's top row, centered on
 /// the same line as the navigation buttons (AppKit's
 /// default sits a few points higher). Re-applied after AppKit relayouts.
+@MainActor
 enum TrafficLights {
     static func place(in window: NSWindow) {
         let kinds: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]

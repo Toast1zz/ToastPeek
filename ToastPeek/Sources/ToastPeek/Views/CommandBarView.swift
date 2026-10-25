@@ -88,14 +88,14 @@ struct CommandBarView: View {
 
     private func computeHits() -> [Hit] {
         let q = query.trimmingCharacters(in: .whitespaces)
-        if q.isEmpty || (mode == .editCurrent && q == store.selectedTab?.urlString) {
+        if q.isEmpty || (mode == .editCurrent && q == store.commandTargetTab?.urlString) {
             return recentTabs()
         }
         var out: [Hit] = []
         out.append(primaryHit(for: q))
 
         var tabHits: [(Int, Hit)] = []
-        for t in store.tabs where !t.isArchived && t.viewSourceFor == nil && t.id != store.selectedTabID {
+        for t in store.tabs where !t.isArchived && t.viewSourceFor == nil && t.id != store.focusedPaneTabID {
             let s = max(FuzzyMatch.score(query: q, candidate: t.displayTitle) ?? -1,
                         FuzzyMatch.score(query: q, candidate: t.displayHost) ?? -1)
             guard s >= 0 else { continue }
@@ -145,7 +145,7 @@ struct CommandBarView: View {
     }
 
     private func recentTabs() -> [Hit] {
-        store.tabs.filter { !$0.isArchived && $0.viewSourceFor == nil && $0.id != store.selectedTabID }
+        store.tabs.filter { !$0.isArchived && $0.viewSourceFor == nil && $0.id != store.focusedPaneTabID }
             .sorted { $0.lastVisitedAt > $1.lastVisitedAt }
             .prefix(7)
             .map { t in
@@ -239,7 +239,7 @@ struct CommandBarView: View {
             .strokeBorder(Color.primary.opacity(scheme == .dark ? 0.12 : 0.06), lineWidth: 1))
         .shadow(color: .black.opacity(0.28), radius: 40, y: 16)
         .onAppear {
-            if mode == .editCurrent, let t = store.selectedTab, t.viewSourceFor == nil, t.url.scheme != "about" {
+            if mode == .editCurrent, let t = store.commandTargetTab, t.viewSourceFor == nil, t.url.scheme != "about" {
                 query = t.urlString
             }
             refreshHits()

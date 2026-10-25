@@ -62,8 +62,8 @@ struct FindBarView: View {
 
     private var countText: String {
         if store.findText.isEmpty { return "" }
-        if store.findMatchCount == 0 { return "No matches" }
-        if store.findActiveOrdinal > 0 { return "\(store.findActiveOrdinal) of \(store.findMatchCount)" }
+        if store.findMatchCount == 0 { return String(localized: "No matches") }
+        if store.findActiveOrdinal > 0 { return String(localized: "\(store.findActiveOrdinal) of \(store.findMatchCount)") }
         return "\(store.findMatchCount)"
     }
 }

@@ -52,10 +52,10 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            SpaceBackdrop(color: store.currentSpace.color)
+            SpaceBackdrop(color: windowState.space(in: store).color)
                 .ignoresSafeArea()
                 .modifier(WindowDragGestureModifier())
-                .animation(.easeInOut(duration: 0.35), value: store.currentSpaceID)
+                .animation(.easeInOut(duration: 0.35), value: windowState.space(in: store).id)
 
             HStack(spacing: 0) {
                 if store.isSidebarVisible && !isFullscreenContent {
@@ -86,7 +86,7 @@ struct ContentView: View {
             if !store.isSidebarVisible && !isFullscreenContent && peekingSidebar {
                 SidebarView()
                     .frame(width: sidebarWidth)
-                    .background(SpaceBackdrop(color: store.currentSpace.color))
+                    .background(SpaceBackdrop(color: windowState.space(in: store).color))
                     .clipShape(UnevenRoundedRectangle(bottomTrailingRadius: 12, topTrailingRadius: 12, style: .continuous))
                     .shadow(color: .black.opacity(0.22), radius: 16, x: 3)
                     .ignoresSafeArea()
@@ -219,13 +219,14 @@ struct ContentView: View {
 /// Window with no tab: a calm start surface.
 private struct EmptyWindowView: View {
     @EnvironmentObject var store: BrowserStore
+    @EnvironmentObject var windowState: WindowTabState
     var body: some View {
         VStack(spacing: 14) {
-            SpaceIcon(space: store.currentSpace, size: 30)
-                .foregroundStyle(store.currentSpace.color)
+            SpaceIcon(space: windowState.space(in: store), size: 30)
+                .foregroundStyle(windowState.space(in: store).color)
                 .frame(width: 64, height: 64)
-                .background(store.currentSpace.color.opacity(0.14), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            Text(store.currentSpace.name).font(.title2.weight(.semibold))
+                .background(windowState.space(in: store).color.opacity(0.14), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            Text(windowState.space(in: store).name).font(.title2.weight(.semibold))
             Button {
                 store.commandBarMode = .newTab
             } label: {
@@ -271,7 +272,7 @@ private struct SplitPanes: View {
             }
         }
         .padding(-0.5)
-        .background(SpaceBackdrop(color: store.currentSpace.color))
+        .background(SpaceBackdrop(color: windowState.space(in: store).color))
         .onAppear { resetFractions() }
         .onChange(of: panes.count) { resetFractions() }
     }
@@ -292,7 +293,7 @@ private struct SplitPanes: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(focused ? store.currentSpace.color.opacity(0.85) : Color.clear, lineWidth: 2)
+                    .strokeBorder(focused ? windowState.space(in: store).color.opacity(0.85) : Color.clear, lineWidth: 2)
                     .allowsHitTesting(false)
             )
             .overlay(alignment: .topTrailing) {
@@ -362,19 +363,23 @@ enum ImportPanels {
         panel.prompt = String(localized: "Import")
         panel.message = String(localized: "Choose “History” from a Chrome, Edge or Brave profile, or Safari’s “History.db”")
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        let rows = HistoryImport.readHistoryFile(at: url)
-        return (store.importHistory(rows), rows.count)
+        switch HistoryImport.readHistoryResult(at: url) {
+        case .success(let rows): return (store.importHistory(rows), rows.count)
+        case .failure(let error): store.toast = error.localizedDescription; return (0, 0)
+        }
     }
 
     /// Post-selection history import, shared by the panel callback and
     /// the DEBUG `importfile` probe (same code path, panel or no panel).
     static func importHistoryFile(at url: URL, into store: BrowserStore) -> (Int, Int) {
-        let rows = HistoryImport.readHistoryFile(at: url)
-        return (store.importHistory(rows), rows.count)
+        switch HistoryImport.readHistoryResult(at: url) {
+        case .success(let rows): return (store.importHistory(rows), rows.count)
+        case .failure(let error): store.toast = error.localizedDescription; return (0, 0)
+        }
     }
 
     /// Non-blocking variant of importHistory .
-    static func beginImportHistory(into store: BrowserStore, completion: @escaping ((Int, Int)?) -> Void) {
+    static func beginImportHistory(into store: BrowserStore, completion: @escaping @MainActor @Sendable ((Int, Int)?) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -382,7 +387,15 @@ enum ImportPanels {
         panel.message = String(localized: "Choose \u{201c}History\u{201d} from a Chrome, Edge or Brave profile, or Safari\u{2019}s \u{201c}History.db\u{201d}")
         panel.begin { response in
             guard response == .OK, let url = panel.url else { completion(nil); return }
-            completion(importHistoryFile(at: url, into: store))
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = HistoryImport.readHistoryResult(at: url)
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let rows): completion((store.importHistory(rows), rows.count))
+                    case .failure(let error): store.toast = error.localizedDescription; completion(nil)
+                    }
+                }
+            }
         }
     }
 }

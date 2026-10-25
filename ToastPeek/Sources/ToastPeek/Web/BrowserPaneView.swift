@@ -130,7 +130,8 @@ final class PaneHostView: NSView {
     override var isFlipped: Bool { true }
 
     func attachIfPossible() {
-        guard let controller, window != nil else { return }
+        guard let controller, let window, bounds.width > 0, bounds.height > 0,
+              controller.store?.mayPresent(tabID: controller.tabID, in: window) != false else { return }
         let container = controller.container
         // SwiftUI may reuse this host for a different tab: drop any other
         // tab's container still parked here.
@@ -142,6 +143,7 @@ final class PaneHostView: NSView {
             addSubview(container)
         }
         controller.lastShownAt = Date()
+        controller.recordPresentationEvent("attach")
         // Create the web view only once the container sits in a window with
         // a real size, so it starts at the pane's actual size.
         if !controller.hasBrowser {
@@ -162,11 +164,17 @@ final class PaneHostView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil { attachIfPossible() }
+        if window != nil { attachIfPossible() } else { detach() }
     }
 
     override func layout() {
         super.layout()
-        controller?.container.frame = bounds
+        // SwiftUI can insert this host at zero size, then lay it out without
+        // another viewDidMoveToWindow. Positive layout must retry the mount.
+        if controller?.container.superview !== self { attachIfPossible() }
+        guard let controller, controller.container.superview === self,
+              bounds.width > 0, bounds.height > 0 else { return }
+        controller.container.frame = bounds
+        if !controller.hasBrowser { attachIfPossible() }
     }
 }

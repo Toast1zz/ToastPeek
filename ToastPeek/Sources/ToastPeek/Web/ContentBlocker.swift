@@ -1,4 +1,5 @@
 import WebKit
+import CryptoKit
 
 /// Native content blocking: the WebKit-era replacement for uBlock-style
 /// Chrome extensions, which cannot load in WKWebView. Behaviour is
@@ -11,6 +12,7 @@ import WebKit
 ///   pages already loaded pick it up on their next navigation or reload.
 /// - The compiled list is cached by WebKit under `identifier`; compilation
 ///   is async, so the first enable applies as soon as it completes.
+@MainActor
 enum ContentBlocker {
     static let identifier = "toastpeek-content-blocker"
 
@@ -50,7 +52,8 @@ enum ContentBlocker {
             let escaped = host.replacingOccurrences(of: ".", with: "\\.")
             return [
                 "trigger": [
-                    "url-filter": ".*://([^/]*\\.)?\(escaped)/.*",
+                    "url-filter": "^https?://([^/:]*\\.)?\(escaped)(:[0-9]+)?/.*",
+                    "load-type": ["third-party"],
                     "resource-type": resourceTypes,
                 ],
                 "action": ["type": "block"],
@@ -64,66 +67,82 @@ enum ContentBlocker {
                 "action": ["type": "ignore-previous-rules"],
             ])
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: rules),
+        guard let data = try? JSONSerialization.data(withJSONObject: rules, options: [.sortedKeys]),
               let json = String(data: data, encoding: .utf8) else { return "[]" }
         return json
     }
 
-    private static var compiled: WKContentRuleList?
-    private static var compiling = false
-    private static var pending: [(WKContentRuleList?) -> Void] = []
+    private static var cache: [String: WKContentRuleList] = [:]
+    private static let compiler = WKContentRuleListStore.default()!
+    private static var cacheOrder: [String] = []
+    private static var pending: [String: [(WKContentRuleList?) -> Void]] = [:]
+    private static var requestIDs: [String: UUID] = [:]
+    private static let installed = NSMapTable<WKUserContentController, WKContentRuleList>.weakToStrongObjects()
+    private static let generations = NSMapTable<WKUserContentController, NSNumber>.weakToStrongObjects()
+    static var isCompiled: Bool { cache[rulesJSON] != nil }
 
-    /// True once the default list has compiled (first enable or first tab).
-    static var isCompiled: Bool { compiled != nil }
-
-    /// Compiles the default list (or returns the cached one) and runs the
-    /// completion on the main thread.
     static func prepare(completion: @escaping (WKContentRuleList?) -> Void) {
-        if let compiled {
-            completion(compiled)
-            return
+        let json = rulesJSON
+        if let list = cache[json] { completion(list); return }
+        if pending[json] != nil { pending[json]?.append(completion); return }
+        pending[json] = [completion]
+        let requestID = UUID()
+        requestIDs[json] = requestID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            guard requestIDs[json] == requestID else { return }
+            requestIDs.removeValue(forKey: json)
+            let callbacks = pending.removeValue(forKey: json) ?? []
+            BrowserDiagnostics.record(["event": "content-blocker-timeout"])
+            callbacks.forEach { $0(nil) }
         }
-        pending.append(completion)
-        guard !compiling else { return }
-        compiling = true
-        WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: identifier, encodedContentRuleList: rulesJSON
-        ) { list, error in
-            if let error {
-                NSLog("ToastPeek content blocker compile failed: %@", error.localizedDescription)
+        let digest = SHA256.hash(data: Data(json.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
+        compiler.compileContentRuleList(forIdentifier: identifier + "." + digest,
+                                                               encodedContentRuleList: json) { list, error in
+            guard requestIDs[json] == requestID else { return }
+            requestIDs.removeValue(forKey: json)
+            if let list {
+                cache[json] = list
+                cacheOrder.removeAll { $0 == json }
+                cacheOrder.append(json)
+                while cacheOrder.count > 4 {
+                    let old = cacheOrder.removeFirst()
+                    if let evicted = cache.removeValue(forKey: old) {
+                        compiler.removeContentRuleList(forIdentifier: evicted.identifier) { _ in }
+                    }
+                }
             }
-            self.compiled = list
-            self.compiling = false
-            let waiting = self.pending
-            self.pending = []
-            for c in waiting { c(list) }
+            if let error { NSLog("ToastPeek content blocker compile failed: %@", error.localizedDescription) }
+            let callbacks = pending.removeValue(forKey: json) ?? []
+            if json != rulesJSON { for callback in callbacks { prepare(completion: callback) } }
+            else { for callback in callbacks { callback(list) } }
         }
     }
 
-    /// Adds the compiled list to a tab's content controller (no-op until
-    /// compilation finishes, then applied via the pending queue).
+    static func install(_ list: WKContentRuleList, to ucc: WKUserContentController) {
+        if let old = installed.object(forKey: ucc) { ucc.remove(old) }
+        ucc.add(list)
+        installed.setObject(list, forKey: ucc)
+    }
+
     static func apply(to ucc: WKUserContentController, completion: ((Bool) -> Void)? = nil) {
-        prepare { list in
-            if let list { ucc.add(list) }
+        remove(from: ucc)
+        let generation = (generations.object(forKey: ucc)?.intValue ?? 0) + 1
+        generations.setObject(NSNumber(value: generation), forKey: ucc)
+        prepare { [weak ucc] list in
+            guard let ucc, generations.object(forKey: ucc)?.intValue == generation else { completion?(false); return }
+            if let list { install(list, to: ucc) }
             completion?(list != nil)
         }
     }
 
-    /// Lists compiled before the last exemption change; tabs still hold them.
-    private static var superseded: [WKContentRuleList] = []
-
-    /// Recompiles with new exemptions. Tabs swap lists on their next refresh.
     static func setExemptHosts(_ hosts: [String]) {
-        guard hosts != exemptHosts else { return }
-        exemptHosts = hosts
-        if let compiled { superseded.append(compiled) }
-        compiled = nil
+        exemptHosts = Array(Set(hosts.map { $0.lowercased() })).sorted()
     }
 
-    /// Removes the list (current and superseded) from a tab's content
-    /// controller. A no-op for lists never added.
     static func remove(from ucc: WKUserContentController) {
-        if let compiled { ucc.remove(compiled) }
-        for old in superseded { ucc.remove(old) }
+        let generation = (generations.object(forKey: ucc)?.intValue ?? 0) + 1
+        generations.setObject(NSNumber(value: generation), forKey: ucc)
+        if let old = installed.object(forKey: ucc) { ucc.remove(old) }
+        installed.removeObject(forKey: ucc)
     }
 }

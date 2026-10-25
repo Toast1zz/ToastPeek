@@ -57,14 +57,14 @@ struct SidebarView: View {
                     FavoritesGrid(handleDrop: handleDrop)
                         .padding(.bottom, store.favorites.isEmpty ? 0 : 12)
                     spaceSection
-                        .id(store.currentSpaceID)
+                        .id(windowState.space(in: store).id)
                         .transition(.asymmetric(
                             insertion: .move(edge: windowState.spaceSwitchForward ? .trailing : .leading).combined(with: .opacity),
                             removal: .move(edge: windowState.spaceSwitchForward ? .leading : .trailing).combined(with: .opacity)))
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
-                .animation(.spring(response: 0.38, dampingFraction: 0.88), value: store.currentSpaceID)
+                .animation(.spring(response: 0.38, dampingFraction: 0.88), value: windowState.space(in: store).id)
             }
             .background(SpaceSwipeDetector())
 
@@ -123,13 +123,13 @@ struct SidebarView: View {
     // MARK: Space section: header, pinned, folders, new tab, today
 
     private var spaceSection: some View {
-        let spaceID = store.currentSpaceID
+        let spaceID = windowState.space(in: store).id
         let ungrouped = store.pinned(in: spaceID, folderID: nil)
         let folders = store.folders(in: spaceID)
         let today = store.today(in: spaceID)
         return VStack(alignment: .leading, spacing: 2) {
             SpaceHeader(onNewFolder: { pendingMoveTab = nil; newFolderName = ""; showNewFolderPrompt = true },
-                        onDelete: { confirmDeleteSpace = store.currentSpace })
+                        onDelete: { confirmDeleteSpace = windowState.space(in: store) })
                 .padding(.bottom, 4)
 
             ForEach(ungrouped) { tab in tabRow(tab) }
@@ -161,7 +161,7 @@ struct SidebarView: View {
     }
 
     private func folderGroup(_ folder: TabFolder) -> some View {
-        let tabs = store.pinned(in: store.currentSpaceID, folderID: folder.id)
+        let tabs = store.pinned(in: windowState.space(in: store).id, folderID: folder.id)
         return VStack(alignment: .leading, spacing: 2) {
             FolderRow(folder: folder, count: tabs.count) { folderMenu(folder) }
                 .dropDestination(for: String.self) { items, _ in
@@ -283,6 +283,7 @@ private struct MoreRow: View {
     var enabled = true
     let action: () -> Void
     @EnvironmentObject var store: BrowserStore
+    @EnvironmentObject var windowState: WindowTabState
     @State private var hovering = false
 
     var body: some View {
@@ -302,7 +303,7 @@ private struct MoreRow: View {
             .frame(height: 42)
             // The system popover's corner is ~18pt and the panel pads 6pt, so
             // 12pt keeps the highlight concentric with it.
-            .background(hovering ? store.currentSpace.color.opacity(0.85) : .clear,
+            .background(hovering ? windowState.space(in: store).color.opacity(0.85) : .clear,
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
@@ -457,10 +458,11 @@ private struct PillButton: View {
 private struct PillProgress: View {
     @ObservedObject var controller: WebTabController
     @EnvironmentObject var store: BrowserStore
+    @EnvironmentObject var windowState: WindowTabState
     var body: some View {
         GeometryReader { geo in
             Rectangle()
-                .fill(store.currentSpace.color.opacity(0.55))
+                .fill(windowState.space(in: store).color.opacity(0.55))
                 .frame(width: geo.size.width * (controller.isLoading ? max(0.05, controller.progress) : 1), height: 2)
                 .opacity(controller.isLoading ? 1 : 0)
                 .animation(.easeOut(duration: 0.25), value: controller.progress)
@@ -528,12 +530,13 @@ private struct FavoriteTile: View {
 
 private struct SpaceHeader: View {
     @EnvironmentObject var store: BrowserStore
+    @EnvironmentObject var windowState: WindowTabState
     let onNewFolder: () -> Void
     let onDelete: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        let space = store.currentSpace
+        let space = windowState.space(in: store)
         HStack(spacing: 6) {
             SpaceIcon(space: space, size: 13)
                 .foregroundStyle(space.color)
@@ -829,6 +832,7 @@ struct TabContextMenu: View {
     let tab: BrowserTab
     let onNewFolder: () -> Void
     @EnvironmentObject var store: BrowserStore
+    @EnvironmentObject var windowState: WindowTabState
 
     var body: some View {
         if tab.kind == .favorite {
@@ -848,7 +852,7 @@ struct TabContextMenu: View {
                     Button("No Folder") { store.moveTabToFolder(tab, folderID: nil) }
                     Divider()
                 }
-                ForEach(store.folders(in: store.currentSpaceID)) { folder in
+                ForEach(store.folders(in: windowState.space(in: store).id)) { folder in
                     Button(folder.name) { store.moveTabToFolder(tab, folderID: folder.id) }
                 }
                 Divider()
@@ -925,11 +929,12 @@ private struct SpaceDot: View {
     let space: BrowserSpace
     @Binding var confirmDelete: BrowserSpace?
     @EnvironmentObject var store: BrowserStore
+    @EnvironmentObject var windowState: WindowTabState
     @Environment(\.colorScheme) private var scheme
     @State private var hovering = false
 
     var body: some View {
-        let active = store.currentSpaceID == space.id
+        let active = windowState.space(in: store).id == space.id
         let index = (store.spaces.firstIndex(of: space) ?? 0) + 1
         Group {
             if store.spaces.count > 6 && !active {
@@ -1015,7 +1020,7 @@ struct SpaceSwipeDetector: NSViewRepresentable {
             }
         }
 
-        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+        deinit { MainActor.assumeIsolated { if let monitor { NSEvent.removeMonitor(monitor) } } }
 
         private func handle(_ event: NSEvent) {
             guard event.window === window, event.hasPreciseScrollingDeltas else { return }

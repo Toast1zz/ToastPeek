@@ -67,6 +67,16 @@
         }
       }
     },
+    "%lld of %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %1$lld 项，共 %2$lld 项"
+          }
+        }
+      }
+    },
     "%lld pinned · %lld history": {
       "extractionState": "manual",
       "localizations": {
@@ -151,6 +161,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "7 天"
+          }
+        }
+      }
+    },
+    "A consistent history snapshot could not be created.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法创建一致的历史记录快照。"
+          }
+        }
+      }
+    },
+    "A damaged state file could not be preserved. Your backup is open read-only.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法保留损坏的状态文件，现以只读方式打开备份。"
           }
         }
       }
@@ -283,6 +313,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "已被“%@”使用"
+          }
+        }
+      }
+    },
+    "Another ToastPeek instance is using this data. This window is read-only.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "另一个 ToastPeek 实例正在使用这份数据。此窗口只读，无法保存更改。"
           }
         }
       }
@@ -859,6 +899,16 @@
         }
       }
     },
+    "Content blocking could not be prepared. Try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "内容拦截规则准备失败，请重试。"
+          }
+        }
+      }
+    },
     "Continue": {
       "extractionState": "manual",
       "localizations": {
@@ -1218,6 +1268,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "下载"
+          }
+        }
+      }
+    },
+    "Download cancelled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载已取消"
+          }
+        }
+      }
+    },
+    "Download failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载失败"
           }
         }
       }
@@ -2685,6 +2755,16 @@
         }
       }
     },
+    "Quit Without Saving": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不保存并退出"
+          }
+        }
+      }
+    },
     "Redo": {
       "extractionState": "manual",
       "localizations": {
@@ -3345,6 +3425,26 @@
         }
       }
     },
+    "The history database is damaged or uses an unsupported schema.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "历史记录数据库已损坏，或使用了不支持的数据格式。"
+          }
+        }
+      }
+    },
+    "The page process stopped. Reload to recover this page.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网页进程已停止。请重新加载以恢复页面。"
+          }
+        }
+      }
+    },
     "The saved file couldn’t be moved aside, so ToastPeek won’t save anything this session.": {
       "extractionState": "manual",
       "localizations": {
@@ -3363,6 +3463,66 @@
           "stringUnit": {
             "state": "translated",
             "value": "保存的文件已原样留在新文件旁边。ToastPeek 用默认标签启动了。"
+          }
+        }
+      }
+    },
+    "The selected history database could not be opened. Check file access permissions.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法打开所选历史记录数据库，请检查文件访问权限。"
+          }
+        }
+      }
+    },
+    "The source browser is busy. Close it and try importing again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来源浏览器正忙，请关闭它后重新导入。"
+          }
+        }
+      }
+    },
+    "This address type is not supported.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不支持此地址类型。"
+          }
+        }
+      }
+    },
+    "This data was saved by a newer version. It has not been changed.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这份数据由更新版本保存，当前版本未修改它。"
+          }
+        }
+      }
+    },
+    "This file does not contain a supported browser history database.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此文件不包含支持的浏览器历史记录数据库。"
+          }
+        }
+      }
+    },
+    "This page could not be saved.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法保存此网页。"
           }
         }
       }
@@ -3407,6 +3567,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "ToastPeek"
+          }
+        }
+      }
+    },
+    "ToastPeek could not save its state.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ToastPeek 无法保存当前状态。"
+          }
+        }
+      }
+    },
+    "ToastPeek is not saving changes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ToastPeek 当前无法保存更改"
           }
         }
       }
@@ -3682,6 +3862,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "无法载入你的 Spaces 和标签"
+          }
+        }
+      }
+    },
+    "Your changes could not be encoded. They have not been saved.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法编码当前更改，尚未保存。"
+          }
+        }
+      }
+    },
+    "Your changes have not been saved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的更改尚未保存"
+          }
+        }
+      }
+    },
+    "Your changes have not been saved: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的更改尚未保存：%@"
           }
         }
       }

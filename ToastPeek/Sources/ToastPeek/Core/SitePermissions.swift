@@ -1,5 +1,18 @@
 import Foundation
 
+enum SiteOrigin {
+    static func make(scheme: String, host: String, port: Int = 0) -> String {
+        let scheme = scheme.lowercased()
+        let rawHost = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        let host = rawHost.contains(":") ? "[\(rawHost)]" : rawHost
+        let effectivePort = port > 0 ? port : scheme == "https" ? 443 : scheme == "http" ? 80 : 0
+        return "\(scheme)://\(host)" + (effectivePort > 0 ? ":\(effectivePort)" : "")
+    }
+    static func make(_ url: URL) -> String {
+        make(scheme: url.scheme ?? "", host: url.host ?? "", port: url.port ?? 0)
+    }
+}
+
 /// Media permission bits (kept stable across the engine switch so
 /// persisted site permissions keep working). WebTabController maps
 /// WKMediaCaptureType onto them.
@@ -54,8 +67,9 @@ enum PermissionDecision: Equatable {
 /// A site's remembered answers, kept per request kind so a bit from one set
 /// can never be read as a bit of the other.
 struct SitePermission: Identifiable, Codable, Hashable {
-    var id: String { origin }
+    var id: String { (profileID?.uuidString ?? "legacy") + "|" + origin }
     var origin: String
+    var profileID: UUID? = nil
     var mediaAllowed: UInt32 = 0
     var mediaDenied: UInt32 = 0
     var promptAllowed: UInt32 = 0
@@ -65,7 +79,7 @@ struct SitePermission: Identifiable, Codable, Hashable {
     init(origin: String) { self.origin = origin }
 
     enum CodingKeys: String, CodingKey {
-        case origin, mediaAllowed, mediaDenied, promptAllowed, promptDenied, updatedAt
+        case origin, profileID, mediaAllowed, mediaDenied, promptAllowed, promptDenied, updatedAt
     }
 
     // Records written before the split stored both bit sets in one mask
@@ -73,6 +87,7 @@ struct SitePermission: Identifiable, Codable, Hashable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         origin = try c.decode(String.self, forKey: .origin)
+        profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
         mediaAllowed = try c.decodeIfPresent(UInt32.self, forKey: .mediaAllowed) ?? 0
         mediaDenied = try c.decodeIfPresent(UInt32.self, forKey: .mediaDenied) ?? 0
         promptAllowed = try c.decodeIfPresent(UInt32.self, forKey: .promptAllowed) ?? 0
@@ -153,16 +168,17 @@ struct SitePermission: Identifiable, Codable, Hashable {
 }
 
 extension Array where Element == SitePermission {
-    func decision(origin: String, kind: PermissionKind, requested: UInt32) -> PermissionDecision {
-        first { $0.origin == origin }?.decision(kind: kind, requested: requested) ?? .ask
+    func decision(origin: String, profileID: UUID? = nil, kind: PermissionKind, requested: UInt32) -> PermissionDecision {
+        first { $0.origin == origin && $0.profileID == profileID }?.decision(kind: kind, requested: requested) ?? .ask
     }
 
-    mutating func remember(origin: String, kind: PermissionKind, requested: UInt32, allow: Bool, now: Date = Date()) {
+    mutating func remember(origin: String, profileID: UUID? = nil, kind: PermissionKind, requested: UInt32, allow: Bool, now: Date = Date()) {
         guard SitePermission.rememberable(kind: kind, requested: requested) != 0 else { return }
-        if let i = firstIndex(where: { $0.origin == origin }) {
+        if let i = firstIndex(where: { $0.origin == origin && $0.profileID == profileID }) {
             self[i].remember(kind: kind, requested: requested, allow: allow, now: now)
         } else {
             var record = SitePermission(origin: origin)
+            record.profileID = profileID
             record.remember(kind: kind, requested: requested, allow: allow, now: now)
             append(record)
         }

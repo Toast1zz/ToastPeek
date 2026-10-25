@@ -1,109 +1,125 @@
 import SwiftUI
 import AppKit
+import CryptoKit
+import ImageIO
 
-/// Favicons by host, as the engine reports them for loaded pages, cached on
-/// disk so unloaded tabs, Favorites and history rows show real icons after
-/// a relaunch. Nothing is fetched from the network here.
-///
-/// Each host has its own observable slot, so a new icon redraws only the
-/// views showing that host, not every row of the sidebar and history.
+/// A bounded, anonymous fetch. Stream limits apply before image decoding.
+enum FaviconLoader {
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 10
+        config.httpMaximumConnectionsPerHost = 4
+        return URLSession(configuration: config)
+    }()
+    nonisolated static func fetch(_ url: URL) async -> Data? {
+        guard ["http", "https"].contains(url.scheme ?? "") else { return nil }
+        do {
+            var request = URLRequest(url: url)
+            request.httpShouldHandleCookies = false
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                  ["http", "https"].contains(response.url?.scheme ?? ""),
+                  response.expectedContentLength <= 524_288 else { return nil }
+            var data = Data()
+            for try await byte in bytes {
+                if Task.isCancelled || data.count >= 524_288 { return nil }
+                data.append(byte)
+            }
+            return data.isEmpty ? nil : data
+        } catch { return nil }
+    }
+}
+
 @MainActor
 final class FaviconStore {
     static let shared = FaviconStore()
-
-    private var slots: [String: FaviconSlot] = [:]
+    private let liveSlots = NSHashTable<FaviconSlot>.weakObjects()
+    private let slots = NSCache<NSString, FaviconSlot>()
     private let directory: URL
     private static let diskQueue = DispatchQueue(label: "app.toastpeek.favicons", qos: .utility)
+    private(set) var generation = 0
 
     private init() {
+        slots.countLimit = 512
         directory = AppPaths.support.appendingPathComponent("Favicons", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
     private func fileURL(forHost host: String) -> URL {
-        directory.appendingPathComponent(host.replacingOccurrences(of: "/", with: "_") + ".png")
+        let key = SHA256.hash(data: Data(host.lowercased().utf8)).map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent(key + ".png")
     }
 
-    /// The slot for a host; its first use loads the disk copy off the main thread.
+    private static func image(_ data: Data) -> NSImage? {
+        guard data.count <= 524_288,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0, width <= 1024, height <= 1024 else { return nil }
+        return NSImage(data: data)
+    }
+
     func slot(forHost host: String) -> FaviconSlot {
-        if let slot = slots[host] { return slot }
+        let key = host.lowercased() as NSString
+        if let slot = slots.object(forKey: key) { return slot }
         let slot = FaviconSlot()
-        slots[host] = slot
+        slots.setObject(slot, forKey: key)
+        liveSlots.add(slot)
         guard !host.isEmpty else { return slot }
-        let url = fileURL(forHost: host)
-        Self.diskQueue.async {
-            guard let data = try? Data(contentsOf: url) else { return }
-            DispatchQueue.main.async {
-                if slot.image == nil { slot.image = NSImage(data: data) }
+        let url = fileURL(forHost: host), expected = generation
+        Self.diskQueue.async { [weak self, weak slot] in
+            guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int,
+                  size <= 524_288, let data = try? Data(contentsOf: url) else { return }
+            DispatchQueue.main.async { [weak self, weak slot] in
+                guard let self, self.generation == expected, let slot, slot.image == nil else { return }
+                slot.image = Self.image(data)
             }
         }
         return slot
     }
 
-    func store(_ png: Data, forHost host: String) {
-        guard !host.isEmpty, let image = NSImage(data: png) else { return }
+    func store(_ data: Data, forHost host: String, generation expected: Int? = nil) {
+        guard !host.isEmpty, expected == nil || expected == generation, let image = Self.image(data) else { return }
         slot(forHost: host).image = image
-        let url = fileURL(forHost: host)
-        Self.diskQueue.async { try? png.write(to: url, options: .atomic) }
-    }
-
-    // MARK: Prefetch (default Favorites, imported bookmarks)
-
-    private var prefetchQueue: [String] = []
-    private var prefetching = 0
-    private var prefetched: Set<String> = []
-
-    /// Fetches `/favicon.ico` for hosts that have no icon yet — tabs that
-    /// were never opened (seeded Favorites, imported bookmarks) would
-    /// otherwise show a globe until first visit. Four at a time, one try
-    /// per host per launch, no cookies.
-    func prefetch(hosts: [String]) {
-        for host in hosts where !host.isEmpty && !prefetched.contains(host) {
-            prefetched.insert(host)
-            let slot = slot(forHost: host)
-            // Give the disk copy a moment to land before deciding it's missing.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                guard slot.image == nil, let self else { return }
-                self.prefetchQueue.append(host)
-                self.pumpPrefetch()
+        let url = fileURL(forHost: host), dir = directory
+        Self.diskQueue.async {
+            try? data.write(to: url, options: .atomic)
+            let fm = FileManager.default
+            let entries = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
+            let ordered = entries.compactMap { file -> (URL, Int, Date)? in
+                guard let v = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
+                return (file, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast)
+            }.sorted { $0.2 < $1.2 }
+            var total = ordered.reduce(0) { $0 + $1.1 }, count = ordered.count
+            for (file, bytes, _) in ordered where total > 25_000_000 || count > 512 {
+                try? fm.removeItem(at: file)
+                total -= bytes; count -= 1
             }
         }
     }
 
-    private func pumpPrefetch() {
-        while prefetching < 4, !prefetchQueue.isEmpty {
-            let host = prefetchQueue.removeFirst()
-            guard let url = URL(string: "https://\(host)/favicon.ico") else { continue }
-            prefetching += 1
-            var request = URLRequest(url: url, timeoutInterval: 6)
-            request.httpShouldHandleCookies = false
-            URLSession.shared.dataTask(with: request) { data, response, _ in
-                var png: Data?
-                if let data, (response as? HTTPURLResponse)?.statusCode == 200,
-                   let image = NSImage(data: data), image.isValid, image.size.width >= 8,
-                   let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
-                    png = rep.representation(using: .png, properties: [:])
-                }
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        if let png { self.store(png, forHost: host) }
-                        self.prefetching -= 1
-                        self.pumpPrefetch()
-                    }
-                }
-            }.resume()
-        }
-    }
+    func prefetch(hosts: [String]) { }
 
-    /// Clear browsing data: forget every icon, in memory and on disk.
-    func removeAll() {
-        for slot in slots.values { slot.image = nil }
+    func removeAll(completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void = { _ in }) {
+        generation += 1
+        // Existing views retain their slots; clear those before evicting.
+        for slot in liveSlots.allObjects { slot.image = nil }
+        slots.removeAllObjects()
         let dir = directory
         Self.diskQueue.async {
             let fm = FileManager.default
-            for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".png") {
-                try? fm.removeItem(at: dir.appendingPathComponent(name))
+            let result: Result<Void, Error> = Result {
+                guard fm.fileExists(atPath: dir.path) else { return }
+                for file in try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+                    try fm.removeItem(at: file)
+                }
             }
+            DispatchQueue.main.async { completion(result) }
         }
     }
 }

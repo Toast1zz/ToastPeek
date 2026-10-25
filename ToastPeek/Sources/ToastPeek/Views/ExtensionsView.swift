@@ -3,6 +3,7 @@ import AppKit
 
 /// Quits and reopens the app once this process has fully exited (two
 /// instances must never share the browser profile).
+@MainActor
 enum AppRelauncher {
     static func relaunch() {
         let pid = ProcessInfo.processInfo.processIdentifier

@@ -281,7 +281,7 @@ private struct DownloadsList: View {
     @EnvironmentObject var store: BrowserStore
 
     var body: some View {
-        let active = store.downloads.filter { $0.state == "inProgress" && matches(search, $0.fileName) }
+        let active = store.downloads.filter { $0.state != "completed" && matches(search, $0.fileName) }
         let records = store.downloadRecords.filter { matches(search, $0.fileName, $0.sourceHost) }
         if active.isEmpty && records.isEmpty {
             LibraryEmpty(symbol: "arrow.down.circle", text: search.isEmpty ? "No downloads" : "No matches")
@@ -305,15 +305,28 @@ private struct DownloadsList: View {
 
 private struct ActiveDownloadRow: View {
     let item: DownloadItemState
+    @EnvironmentObject var store: BrowserStore
     var body: some View {
         LibraryRow(title: item.fileName, subtitle: progressText, action: {}) {
             FileIcon(path: "", fileName: item.fileName)
         } trailing: {
-            ProgressView(value: item.percent >= 0 ? Double(item.percent) : nil, total: 100)
-                .progressViewStyle(.circular).controlSize(.small)
+            if item.state == "inProgress" {
+                ProgressView(value: item.percent >= 0 ? Double(item.percent) : nil, total: 100)
+                    .progressViewStyle(.circular).controlSize(.small)
+            }
+        }
+        .contextMenu {
+            if item.state == "inProgress" {
+                Button("Cancel") { store.downloadManager.cancel(item.id) }
+            } else {
+                if store.downloadManager.canRetry(item.id) { Button("Try Again") { store.downloadManager.retry(item.id) } }
+                Button("Remove from List") { store.downloadManager.removeRecord(item.id) }
+            }
         }
     }
     private var progressText: String {
+        if item.state == "cancelled" { return String(localized: "Download cancelled") }
+        if item.state == "failed" { return item.errorDescription ?? String(localized: "Download failed") }
         func bytes(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
         return item.totalBytes > 0 ? "\(bytes(item.receivedBytes)) / \(bytes(item.totalBytes))" : bytes(item.receivedBytes)
     }

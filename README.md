@@ -23,7 +23,7 @@ ToastPeek also includes a PDF viewer, a Library (downloads, media, archived tabs
 
 ## Install
 
-1. Download `ToastPeek-<version>-universal.zip` from the [latest release](../../releases/latest) and unzip it.
+1. Download `ToastPeek-<version>-arm64.zip` for Apple silicon, or `ToastPeek-<version>-universal.zip` for Apple silicon and Intel, from the [latest release](../../releases/latest), and unzip it.
 2. Move `ToastPeek.app` to `/Applications`.
 3. The app is ad-hoc signed and not notarized, so Gatekeeper blocks the first launch. On macOS 14, right-click the app and choose **Open**. On macOS 15 and later, try to open it once, then click **Open Anyway** in System Settings > Privacy & Security. Alternatively, run:
 
@@ -32,6 +32,8 @@ ToastPeek also includes a PDF viewer, a Library (downloads, media, archived tabs
    ```
 
 Data is stored in `~/Library/Application Support/ToastPeek`, and logs in `~/Library/Logs/ToastPeek`.
+
+Quit all older copies before upgrading. Version 1.0.2 prevents two new instances from saving to the same state file, but older builds do not honor that lock. Keep a backup before opening your data in a new version; downgrading can discard newer state fields.
 
 ## Why WebKit instead of CEF/Chromium
 
@@ -51,6 +53,8 @@ The trade-off is that Chrome extensions do not work in ToastPeek, and the app do
 - Release builds are ad-hoc signed and not notarized.
 - The Intel (x86_64) code has not been tested on an Intel Mac.
 
+Version 1.0.2 fixes several page-hosting problems, but an intermittent blank GitHub page seen in an older, signed-in session has not been conclusively diagnosed. See [reliability notes](docs/RELIABILITY.md) for the fixes, test coverage and remaining limits.
+
 ## Build from source
 
 Requirements: Xcode (developed with Xcode 27) and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
@@ -59,10 +63,15 @@ Requirements: Xcode (developed with Xcode 27) and [XcodeGen](https://github.com/
 git clone https://github.com/Toast1zz/ToastPeek.git
 cd ToastPeek
 scripts/build.sh release     # universal Release build
-scripts/test.sh              # unit tests
+scripts/test.sh              # core and real AppKit/WebKit tests
+scripts/package.sh           # arm64 and universal public Release archives
 ```
 
-`scripts/build.sh` generates `ToastPeek/ToastPeek.xcodeproj` from `ToastPeek/project.yml` and builds into `~/Developer/Builds/ToastPeek`. To use a different folder, set `TOASTPEEK_BUILD_DIR`. The app is written to `DerivedData/Build/Products/<Config>/ToastPeek.app` under that folder. `scripts/build.sh` with no argument makes an arm64-only Debug build. `scripts/build.sh release` makes a universal Release build. `scripts/build.sh install` also copies the Release build to `/Applications`, and quits a running ToastPeek first.
+`scripts/build.sh` generates `ToastPeek/ToastPeek.xcodeproj` from `ToastPeek/project.yml` and builds into `~/Developer/Builds/ToastPeek`. To use a different folder, set `TOASTPEEK_BUILD_DIR`. The app is written to `DerivedData/Build/Products/<Config>/ToastPeek.app` under that folder. `scripts/build.sh` with no argument makes an arm64-only Debug build. `scripts/build.sh release` makes a universal Release build. `scripts/build.sh install` also copies the Release build to `/Applications`, quits the installed copy first, and preserves the previous app bundle. Quit any other copies using the same data before installing.
+
+Debug uses `app.toastpeek.mac.debug` and stores data in `~/Library/Application Support/ToastPeek-Development`; `TOASTPEEK_SUPPORT_DIR` can point it at a temporary directory. Release uses the normal data directory. Tests use temporary state files and website data stores.
+
+`scripts/package.sh` explicitly uses ad-hoc signing and complete Swift concurrency checks. Its archives are written to `Releases/<version>` under the build folder. Pass `arm64` or `universal` to build only one variant. This packaging path does not install the app.
 
 Builds are ad-hoc signed by default. To sign with your own Apple Development certificate, copy `ToastPeek/config/Local.xcconfig.example` to `ToastPeek/config/Local.xcconfig` and fill in your identity and team ID. Git ignores that file. A stable identity keeps keychain items trusted across rebuilds.
 

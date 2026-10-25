@@ -54,6 +54,16 @@ final class StateFileTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: kept, encoding: .utf8), "{ not json")
     }
 
+    func testBackupRecoveryStaysReadOnlyWhenDamagedPrimaryCannotBePreserved() throws {
+        try write("{ not json", to: file.primary)
+        try XCTUnwrap(StateFile.encode(snapshot(tabTitle: "backup"))).write(to: file.backup)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+        guard case .recoveredReadOnly(let recovered) = file.load() else { return XCTFail("expected read-only backup recovery") }
+        XCTAssertEqual(recovered.tabs.first?.title, "backup")
+        XCTAssertEqual(try String(contentsOf: file.primary), "{ not json")
+    }
+
     func testBothUnreadableAreMovedAsideNotDeleted() throws {
         try write("garbage-1", to: file.primary)
         try write("garbage-2", to: file.backup)
@@ -104,5 +114,54 @@ final class StateFileTests: XCTestCase {
         s.searchSuggestionsEnabled = true
         let decoded = try XCTUnwrap(StateFile.decode(XCTUnwrap(StateFile.encode(s))))
         XCTAssertNil(decoded.settingsVersion)
+    }
+
+    func testFutureSchemaIsPreservedWithoutFallbackOrRewrite() throws {
+        var future = snapshot()
+        future.schemaVersion = StateSnapshot.currentSchemaVersion + 1
+        let data = try XCTUnwrap(StateFile.encode(future))
+        try data.write(to: file.primary)
+        guard case .unsupportedVersion = file.load() else { return XCTFail("future schema must not be overwritten") }
+        XCTAssertEqual(try Data(contentsOf: file.primary), data)
+        XCTAssertTrue(try leftovers().isEmpty)
+    }
+
+    func testSemanticRepairKeepsTabAndRepairsOrphanReferences() throws {
+        var value = snapshot()
+        value.tabs[0].spaceID = UUID()
+        value.tabs[0].folderID = UUID()
+        value.tabs[0].isArchived = true
+        let repaired = try XCTUnwrap(StateFile.decode(XCTUnwrap(StateFile.encode(value))))
+        XCTAssertEqual(repaired.tabs.count, 1)
+        XCTAssertEqual(repaired.tabs[0].spaceID, repaired.currentSpaceID)
+        XCTAssertNil(repaired.tabs[0].folderID)
+        XCTAssertEqual(repaired.tabs[0].profileID, repaired.spaces[0].dataStoreID)
+        XCTAssertNotNil(repaired.tabs[0].archivedAt)
+    }
+
+    func testAmbiguousSpaceAndCookieIdentitiesAreRejected() throws {
+        var value = snapshot()
+        value.spaces.append(value.spaces[0])
+        XCTAssertNil(StateFile.decode(try XCTUnwrap(StateFile.encode(value))))
+        value.spaces[1].id = UUID()
+        XCTAssertNil(StateFile.decode(try XCTUnwrap(StateFile.encode(value))))
+    }
+
+    func testWritingIntoInvalidDirectoryReturnsFailure() throws {
+        let invalidParent = dir.appendingPathComponent("not-a-directory")
+        try Data("file".utf8).write(to: invalidParent)
+        let bad = StateFile(primary: invalidParent.appendingPathComponent("state.json"))
+        guard case .failure = bad.write(try XCTUnwrap(StateFile.encode(snapshot())), rotateBackup: false) else {
+            return XCTFail("write failure must reach caller")
+        }
+    }
+
+    func testReadOnlyLoadNeverMovesCorruptState() throws {
+        let bytes = Data("corrupt".utf8)
+        try bytes.write(to: file.primary)
+        guard case .unreadable(_, let preserved) = file.load(preserveOnly: true) else { return XCTFail("unreadable") }
+        XCTAssertFalse(preserved)
+        XCTAssertEqual(try Data(contentsOf: file.primary), bytes)
+        XCTAssertTrue(try leftovers().isEmpty)
     }
 }

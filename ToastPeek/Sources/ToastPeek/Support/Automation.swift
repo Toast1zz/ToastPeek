@@ -231,7 +231,7 @@ final class Automation {
             let ok = words.first == "ok"
             if ok, words.count > 1 { panel.nameFieldStringValue = words.dropFirst().joined(separator: " ") }
             if panel.sheetParent != nil {
-                NSApp.endSheet(panel, returnCode: (ok ? NSApplication.ModalResponse.OK : .cancel).rawValue)
+                panel.sheetParent?.endSheet(panel, returnCode: ok ? .OK : .cancel)
             } else if ok {
                 panel.ok(nil)
             } else {
@@ -249,7 +249,7 @@ final class Automation {
             case "first": code = .alertFirstButtonReturn
             default: code = .alertSecondButtonReturn
             }
-            NSApp.endSheet(sheet, returnCode: code.rawValue)
+            w.endSheet(sheet, returnCode: code)
             return "ok"
         case "clearall":
             guard let store else { return "no store" }

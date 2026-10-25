@@ -87,6 +87,9 @@ struct BrowserTab: Identifiable, Codable, Hashable {
     /// Pinned tabs and Favorites remember the address they were pinned at;
     /// closing one unloads it and returns it there (Chrome-style).
     var pinnedURLString: String? = nil
+    /// Cookie identity is independent of sidebar grouping and Space ordering.
+    var profileID: UUID? = nil
+    var archivedAt: Date? = nil
 
     var url: URL { URL(string: urlString) ?? URL(string: "about:blank") ?? URL(fileURLWithPath: "/") }
     var host: String { url.host ?? "" }
@@ -119,7 +122,7 @@ extension BrowserTab {
     // Hand-written Codable (in an extension, so the memberwise init and
     // Hashable synthesis survive): fields added later fall back to defaults.
     enum CodingKeys: String, CodingKey {
-        case id, spaceID, kind, title, urlString, createdAt, lastVisitedAt, isArchived, folderID, sortIndex, viewSourceFor, pinnedURLString
+        case id, spaceID, kind, title, urlString, createdAt, lastVisitedAt, isArchived, folderID, sortIndex, viewSourceFor, pinnedURLString, profileID, archivedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -136,6 +139,8 @@ extension BrowserTab {
         sortIndex = try c.decodeIfPresent(Double.self, forKey: .sortIndex) ?? 0
         viewSourceFor = try c.decodeIfPresent(String.self, forKey: .viewSourceFor)
         pinnedURLString = try c.decodeIfPresent(String.self, forKey: .pinnedURLString)
+        profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
+        archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -152,6 +157,8 @@ extension BrowserTab {
         try c.encode(sortIndex, forKey: .sortIndex)
         try c.encodeIfPresent(viewSourceFor, forKey: .viewSourceFor)
         try c.encodeIfPresent(pinnedURLString, forKey: .pinnedURLString)
+        try c.encodeIfPresent(profileID, forKey: .profileID)
+        try c.encodeIfPresent(archivedAt, forKey: .archivedAt)
     }
 }
 
@@ -176,7 +183,7 @@ struct BrowserExtension: Identifiable, Codable, Hashable {
 
 struct DownloadItemState: Identifiable, Equatable {
     /// Download id (unique per download, stable across its updates).
-    var id: UInt32
+    var id: UUID
     var fileName: String
     var urlString: String
     var fullPath: String
@@ -186,6 +193,7 @@ struct DownloadItemState: Identifiable, Equatable {
     var totalBytes: Int64
     /// "inProgress" / "completed" / "cancelled" — raw strings across the bridge.
     var state: String
+    var errorDescription: String? = nil
 
     var isComplete: Bool { state == "completed" }
     var fileURL: URL { URL(fileURLWithPath: fullPath) }
@@ -285,12 +293,14 @@ enum URLResolver {
     /// True when the text should be treated as an address, not a search.
     static func looksLikeURL(_ raw: String) -> Bool {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty, !s.contains(" ") else { return false }
-        if let scheme = URL(string: s)?.scheme?.lowercased(), schemes.contains(scheme) { return true }
-        if s.hasPrefix("localhost") { return true }
-        let hostPart = s.split(separator: "/").first.map(String.init) ?? s
-        let host = hostPart.split(separator: ":").first.map(String.init) ?? hostPart
-        if host.split(separator: ".").count == 4, host.allSatisfy({ $0.isNumber || $0 == "." }) { return true }
+        guard !s.isEmpty else { return false }
+        if let scheme = URL(string: s)?.scheme?.lowercased(), schemes.contains(scheme) || s.contains("://") { return true }
+        guard !s.contains(where: { $0.isWhitespace }) else { return false }
+        guard let host = URLComponents(string: "http://" + s)?.host?.lowercased() else { return false }
+        if host == "localhost" || host.hasSuffix(".localhost") { return true }
+        if host.hasPrefix("["), host.hasSuffix("]"), host.contains(":") { return true }
+        let octets = host.split(separator: ".")
+        if octets.count == 4, octets.allSatisfy({ Int($0).map { (0...255).contains($0) } == true }) { return true }
         guard host.contains("."), !host.hasPrefix("."), !host.hasSuffix(".") else { return false }
         let tld = host.split(separator: ".").last.map(String.init) ?? ""
         return tld.count >= 2 && tld.allSatisfy { $0.isLetter }
@@ -300,8 +310,11 @@ enum URLResolver {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
         if looksLikeURL(s) {
-            if let u = URL(string: s), let scheme = u.scheme?.lowercased(), schemes.contains(scheme) { return u }
-            let prefix = s.hasPrefix("localhost") || s.first?.isNumber == true ? "http://" : "https://"
+            if let u = URL(string: s), let scheme = u.scheme?.lowercased(), schemes.contains(scheme) || s.contains("://") { return u }
+            let host = URLComponents(string: "http://" + s)?.host?.lowercased() ?? ""
+            let isLocal = host == "localhost" || host.hasSuffix(".localhost") || host.hasPrefix("[")
+                || (host.split(separator: ".").count == 4 && host.allSatisfy { $0.isNumber || $0 == "." })
+            let prefix = isLocal ? "http://" : "https://"
             return URL(string: prefix + s)
         }
         return searchURL(for: s, engine: engine)

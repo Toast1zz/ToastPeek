@@ -13,9 +13,14 @@ import sys
 config = sys.argv[1] if len(sys.argv) > 1 else "Debug"
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 out = os.environ.get("TOASTPEEK_BUILD_DIR", os.path.expanduser("~/Developer/Builds/ToastPeek"))
-pattern = f"{out}/DerivedData/Build/Intermediates.noindex/ToastPeek.build/{config}/ToastPeek.build/Objects-normal/*/*.stringsdata"
+derived = os.environ.get("TOASTPEEK_DERIVED_DATA", os.path.join(out, "DerivedData"))
+pattern = f"{derived}/Build/Intermediates.noindex/ToastPeek.build/{config}/ToastPeek.build/Objects-normal/*/*.stringsdata"
 keys = set()
-for path in glob.glob(pattern):
+inputs = glob.glob(pattern)
+if not inputs:
+    print("No stringsdata inputs found; build this configuration before checking localization.", file=sys.stderr)
+    sys.exit(2)
+for path in inputs:
     with open(path) as fh:
         for entries in json.load(fh).get("tables", {}).values():
             keys.update(e["key"] for e in entries if e["key"])

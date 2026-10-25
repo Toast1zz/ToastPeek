@@ -63,7 +63,9 @@ enum ImportSources {
     }
 
     private static func modified(_ url: URL) -> Date {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        let main = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        let wal = (try? URL(fileURLWithPath: url.path + "-wal").resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        return max(main, wal)
     }
 
     /// The profile folder (Default, Profile 1…) whose History was touched last.
@@ -89,6 +91,7 @@ enum ImportSources {
 
     struct Payload {
         var history: [ImportedHistoryRow] = []
+        var errors: [String] = []
     }
 
     /// Reads a source's data. Blocking: call off the main thread.
@@ -96,11 +99,26 @@ enum ImportSources {
         var p = Payload()
         switch source.kind {
         case .chromium:
-            if let h = source.history { p.history = HistoryImport.readHistoryFile(at: h) }
+            if let h = source.history {
+                switch HistoryImport.readHistoryResult(at: h) {
+                case .success(let rows): p.history = rows
+                case .failure(let error): p.errors.append(error.localizedDescription)
+                }
+            }
         case .safari:
-            if let h = source.history { p.history = HistoryImport.readHistoryFile(at: h) }
+            if let h = source.history {
+                switch HistoryImport.readHistoryResult(at: h) {
+                case .success(let rows): p.history = rows
+                case .failure(let error): p.errors.append(error.localizedDescription)
+                }
+            }
         case .firefox:
-            if let f = source.history { p.history = HistoryImport.readFirefoxHistory(at: f) }
+            if let f = source.history {
+                switch HistoryImport.readHistoryResult(at: f) {
+                case .success(let rows): p.history = rows
+                case .failure(let error): p.errors.append(error.localizedDescription)
+                }
+            }
         }
         return p
     }

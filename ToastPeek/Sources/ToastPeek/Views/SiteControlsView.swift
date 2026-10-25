@@ -74,18 +74,20 @@ extension BrowserStore {
         onOpenSettings?(.boosts)
     }
 
-    func mediaDecision(origin: String, bit: UInt32) -> PermissionDecision {
-        sitePermissions.decision(origin: origin, kind: .media, requested: bit)
+    func mediaDecision(origin: String, profileID: UUID, bit: UInt32) -> PermissionDecision {
+        sitePermissions.decision(origin: origin, profileID: profileID, kind: .media, requested: bit)
     }
 
-    func setMediaDecision(_ decision: PermissionDecision, origin: String, bit: UInt32) {
-        var record = sitePermissions.first { $0.origin == origin } ?? SitePermission(origin: origin)
+    func setMediaDecision(_ decision: PermissionDecision, origin: String, profileID: UUID, bit: UInt32) {
+        var record = sitePermissions.first { $0.origin == origin && $0.profileID == profileID } ?? SitePermission(origin: origin)
+        record.profileID = profileID
         record.mediaAllowed &= ~bit
         record.mediaDenied &= ~bit
         if decision == .allow { record.mediaAllowed |= bit }
         if decision == .deny { record.mediaDenied |= bit }
         record.updatedAt = Date()
-        sitePermissions.removeAll { $0.origin == origin }
+        sitePermissions.removeAll { $0.origin == origin && $0.profileID == profileID }
+        if decision != .allow { for controller in controllers.values where controller.dataStoreID == profileID { controller.stopCapture() } }
         if !record.isEmpty { sitePermissions.append(record) }
         scheduleSave()
     }
@@ -113,7 +115,9 @@ struct SiteControlsView: View {
     @State private var cleared = false
 
     private var host: String { tab.host }
-    private var origin: String { "\(tab.url.scheme ?? "https")://\(host)" }
+    private var origin: String { SiteOrigin.make(tab.url) }
+    private var profileID: UUID { store.profileSpace(for: tab).dataStoreID }
+    private var secure: Bool { store.controller(forTabID: tab.id)?.isSecureConnection == true }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -121,9 +125,9 @@ struct SiteControlsView: View {
                 FaviconView(host: host, size: 20)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(BrowserStore.siteKey(host)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text(tab.url.scheme == "https" ? "Connection is secure" : "Connection is not secure")
+                    Text(secure ? "Connection is secure" : "Connection is not secure")
                         .font(.system(size: 11))
-                        .foregroundStyle(tab.url.scheme == "https" ? Color.secondary : Color.orange)
+                        .foregroundStyle(secure ? Color.secondary : Color.orange)
                 }
                 Spacer(minLength: 0)
             }
@@ -158,12 +162,12 @@ struct SiteControlsView: View {
                 ZoomRow(controller: store.controller(forTabID: tab.id))
                 CardDivider()
                 PermissionRow(symbol: "video.fill", tint: .green, title: "Camera",
-                              decision: Binding(get: { store.mediaDecision(origin: origin, bit: MediaPermission.camera) },
-                                                set: { store.setMediaDecision($0, origin: origin, bit: MediaPermission.camera) }))
+                              decision: Binding(get: { store.mediaDecision(origin: origin, profileID: profileID, bit: MediaPermission.camera) },
+                                                set: { store.setMediaDecision($0, origin: origin, profileID: profileID, bit: MediaPermission.camera) }))
                 CardDivider()
                 PermissionRow(symbol: "mic.fill", tint: .orange, title: "Microphone",
-                              decision: Binding(get: { store.mediaDecision(origin: origin, bit: MediaPermission.microphone) },
-                                                set: { store.setMediaDecision($0, origin: origin, bit: MediaPermission.microphone) }))
+                              decision: Binding(get: { store.mediaDecision(origin: origin, profileID: profileID, bit: MediaPermission.microphone) },
+                                                set: { store.setMediaDecision($0, origin: origin, profileID: profileID, bit: MediaPermission.microphone) }))
             }
 
             ControlCard {

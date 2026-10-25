@@ -28,6 +28,7 @@ let app = ToastPeekApplication.shared
 app.delegate = delegate
 _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
 
+@MainActor
 final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var store: BrowserStore = MainActor.assumeIsolated { BrowserStore() }
     /// Main browser windows share ONE store; each has its own selection.
@@ -75,7 +76,7 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
     private func installTerminationSignalHandler() {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        source.setEventHandler { NSApp.terminate(nil) }
+        source.setEventHandler { MainActor.assumeIsolated { NSApp.terminate(nil) } }
         source.resume()
         termSource = source
     }
@@ -122,7 +123,7 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
     /// Peek: a small window for links from other apps. Read it, close it,
     /// or move it into a Space with the page as it is.
     @MainActor
-    private func presentPeek(url: URL?) {
+    private func presentPeek(url: URL?, sourceTabID: UUID? = nil) {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 620),
                          styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
@@ -130,7 +131,9 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         w.titleVisibility = .hidden
         w.isReleasedWhenClosed = false
         w.delegate = self
-        let view = PeekWindowView(url: url, onClose: { [weak self, weak w] in
+        let source = sourceTabID.flatMap { store.tab($0) ?? store.peekTabs[$0] }
+        let profile = source.map { store.profileSpace(for: $0) } ?? store.currentSpace
+        let view = PeekWindowView(url: url, profileSpace: profile, onClose: { [weak self, weak w] in
             guard let w else { return }
             self?.closePeek(w)
         }, onMoveToSpace: { [weak self, weak w] tab, spaceID in
@@ -212,7 +215,7 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.5, 0, 0.75, 0.4)
             w.animator().setFrame(end, display: true)
         }, completionHandler: { [weak w] in
-            w?.close()
+            MainActor.assumeIsolated { w?.close() }
         })
         // The fade only takes the last stretch, so the fold itself is what reads.
         DispatchQueue.main.asyncAfter(deadline: .now() + (intoSidebar ? 0.18 : 0.12)) { [weak w] in
@@ -350,6 +353,9 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
             #endif
             store.onOpenSettings = { [weak self] page in self?.openSettings(page: page) }
             store.onOpenPeek = { [weak self] url in MainActor.assumeIsolated { self?.presentPeek(url: url) } }
+            store.onOpenPeekFromPage = { [weak self] url, sourceID in
+                MainActor.assumeIsolated { self?.presentPeek(url: url, sourceTabID: sourceID) }
+            }
             store.onSpacesChanged = { [weak self] in self?.rebuildSpacesMenu() }
             store.onTearOffTab = { [weak self] tab in
                 guard let self, !self.tearOffInFlight else { return }
@@ -363,8 +369,8 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
                         for ws in sources {
                             ws.splitTabIDs.removeAll { $0 == tab.id }
                             if ws.selectedTabID == tab.id {
-                                ws.selectedTabID = self.store.today(in: self.store.currentSpaceID).first { $0.id != tab.id }?.id
-                                    ?? self.store.pinned(in: self.store.currentSpaceID).first { $0.id != tab.id }?.id
+                                ws.selectedTabID = self.store.today(in: ws.spaceID ?? self.store.currentSpaceID).first { $0.id != tab.id }?.id
+                                    ?? self.store.pinned(in: ws.spaceID ?? self.store.currentSpaceID).first { $0.id != tab.id }?.id
                                 ws.focusedPaneTabID = ws.selectedTabID
                             }
                         }
@@ -402,8 +408,31 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        MainActor.assumeIsolated { store.flush() }
-        return .terminateNow
+        var quitWithoutSaving = false
+        let decision: NSApplication.TerminateReply = MainActor.assumeIsolated {
+            if store.isReadOnly || store.flush() { return .terminateNow }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = String(localized: "Your changes have not been saved")
+            alert.informativeText = store.persistenceError ?? String(localized: "ToastPeek could not save its state.")
+            alert.addButton(withTitle: String(localized: "Try Again"))
+            alert.addButton(withTitle: String(localized: "Cancel"))
+            alert.addButton(withTitle: String(localized: "Quit Without Saving"))
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: return store.flush() ? .terminateNow : .terminateCancel
+            case .alertThirdButtonReturn: quitWithoutSaving = true; return .terminateNow
+            default: return .terminateCancel
+            }
+        }
+        guard decision == .terminateNow else { return decision }
+        // WKDownload cancellation is asynchronous. Await it before process
+        // exit so callbacks can release temporary files and profile handles.
+        store.downloadManager.cancelAll(keepingResumeData: false) { [weak self] in
+            guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
+            let saved = self.store.isReadOnly || self.store.flush()
+            sender.reply(toApplicationShouldTerminate: quitWithoutSaving || saved)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -590,11 +619,11 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         MainActor.assumeIsolated {
             switch menuItem.action {
             case #selector(menuMuteTab):
-                menuItem.title = store.selectedTab.map { store.isTabMuted($0) } == true ? String(localized: "Unmute Tab") : String(localized: "Mute Tab")
+                menuItem.title = store.commandTargetTab.map { store.isTabMuted($0) } == true ? String(localized: "Unmute Tab") : String(localized: "Mute Tab")
             case #selector(menuPinTab):
-                menuItem.title = store.selectedTab?.kind == .pinned ? String(localized: "Unpin Tab") : String(localized: "Pin Tab")
+                menuItem.title = store.commandTargetTab?.kind == .pinned ? String(localized: "Unpin Tab") : String(localized: "Pin Tab")
             case #selector(menuFavoriteTab):
-                menuItem.title = store.selectedTab?.kind == .favorite ? String(localized: "Remove from Favorites") : String(localized: "Add to Favorites")
+                menuItem.title = store.commandTargetTab?.kind == .favorite ? String(localized: "Remove from Favorites") : String(localized: "Add to Favorites")
             case #selector(menuToggleSidebar):
                 menuItem.title = store.isSidebarVisible ? String(localized: "Hide Sidebar") : String(localized: "Show Sidebar")
             case #selector(menuSwitchSpace(_:)):
@@ -643,7 +672,7 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
     @objc private func menuOpenLocation() {
         MainActor.assumeIsolated {
             if keyWindowIsAuxiliary { return }
-            store.commandBarMode = store.selectedTab == nil ? .newTab : .editCurrent
+            store.commandBarMode = store.commandTargetTab == nil ? .newTab : .editCurrent
         }
     }
     @objc private func menuNewSpace() { MainActor.assumeIsolated { store.spaceEditor = SpaceEditorRequest(spaceID: nil) } }
@@ -660,11 +689,15 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         if keyWindowIsAuxiliary { NSApp.keyWindow?.performClose(nil); return }
         MainActor.assumeIsolated {
             if store.commandBarMode != nil { store.commandBarMode = nil; return }
+            if let c = store.activeController, store.peekTabs[c.tabID] != nil {
+                c.container.window?.performClose(nil)
+                return
+            }
             if let ws = store.activeWindowState, ws.splitTabIDs.count > 0, let f = ws.focusedPaneTabID {
                 store.closeSplitPane(tabID: f)
                 return
             }
-            if let t = store.selectedTab { store.close(t) } else { NSApp.keyWindow?.performClose(nil) }
+            if let t = store.commandTargetTab { store.close(t) } else { NSApp.keyWindow?.performClose(nil) }
         }
     }
     @objc private func menuCloseWindow() { NSApp.keyWindow?.performClose(nil) }
@@ -689,10 +722,10 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
     @objc private func menuNextTab() { MainActor.assumeIsolated { store.selectAdjacentTab(forward: true) } }
     @objc private func menuPreviousTab() { MainActor.assumeIsolated { store.selectAdjacentTab(forward: false) } }
     @objc private func menuSelectTabIndex(_ sender: NSMenuItem) { MainActor.assumeIsolated { store.selectTab(atSidebarIndex: sender.tag) } }
-    @objc private func menuPinTab() { MainActor.assumeIsolated { if let t = store.selectedTab { store.pin(t) } } }
-    @objc private func menuFavoriteTab() { MainActor.assumeIsolated { if let t = store.selectedTab { store.toggleFavorite(t) } } }
-    @objc private func menuDuplicateTab() { MainActor.assumeIsolated { if let t = store.selectedTab { store.duplicate(t) } } }
-    @objc private func menuMuteTab() { MainActor.assumeIsolated { if let t = store.selectedTab { store.toggleTabMuted(t) } } }
+    @objc private func menuPinTab() { MainActor.assumeIsolated { if let t = store.commandTargetTab { store.pin(t) } } }
+    @objc private func menuFavoriteTab() { MainActor.assumeIsolated { if let t = store.commandTargetTab { store.toggleFavorite(t) } } }
+    @objc private func menuDuplicateTab() { MainActor.assumeIsolated { if let t = store.commandTargetTab { store.duplicate(t) } } }
+    @objc private func menuMuteTab() { MainActor.assumeIsolated { if let t = store.commandTargetTab { store.toggleTabMuted(t) } } }
     @objc private func menuNextSpace() { MainActor.assumeIsolated { store.switchSpaceRelative(1) } }
     @objc private func menuPreviousSpace() { MainActor.assumeIsolated { store.switchSpaceRelative(-1) } }
     @objc private func menuSwitchSpace(_ sender: NSMenuItem) {
@@ -703,9 +736,11 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
     }
     @objc private func menuImportHistory() {
         MainActor.assumeIsolated {
-            guard let (added, found) = ImportPanels.importHistory(into: store) else { return }
-            store.toast = found == 0 ? String(localized: "No history found in that file.")
-                : String(localized: "History entries imported: \(added)")
+            ImportPanels.beginImportHistory(into: store) { [weak self] result in
+                guard let (added, found) = result else { return }
+                self?.store.toast = found == 0 ? String(localized: "No history found in that file.")
+                    : String(localized: "History entries imported: \(added)")
+            }
         }
     }
     @objc private func menuSettings() { openSettings(page: nil) }

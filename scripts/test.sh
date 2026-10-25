@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the unit tests (no browser engine needed at runtime).
+# Run core logic and real AppKit/WebKit integration tests.
 #   scripts/test.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,12 +11,19 @@ export CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 mkdir -p "$OUT"
 cd "$ROOT/ToastPeek"
 xcodegen generate --quiet
-set +e
-# NB: the identity must be a command-line build setting: merely exporting
-# CODE_SIGN_IDENTITY does not change what xcodebuild signs with.
-xcodebuild -project ToastPeek.xcodeproj -scheme ToastPeekTests -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath "$OUT/DerivedData" CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}" test > "$OUT/test.log" 2>&1
-code=$?
-set -e
-grep -E "error:|Test Case .* failed|Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)" "$OUT/test.log" | tail -40 || true
-exit $code
+schemes=(ToastPeekTests ToastPeekIntegrationTests)
+if [[ "${1:-}" == "core" ]]; then schemes=(ToastPeekTests); fi
+if [[ "${1:-}" == "integration" ]]; then schemes=(ToastPeekIntegrationTests); fi
+test_args=(test)
+if [[ -n "${TOASTPEEK_TEST_FILTER:-}" ]]; then test_args+=("-only-testing:$TOASTPEEK_TEST_FILTER"); fi
+for scheme in "${schemes[@]}"; do
+  log="$OUT/$scheme.log"
+  set +e
+  xcodebuild -project ToastPeek.xcodeproj -scheme "$scheme" -destination 'platform=macOS,arch=arm64' \
+    -derivedDataPath "$OUT/DerivedData" CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}" "${test_args[@]}" > "$log" 2>&1
+  code=$?
+  set -e
+  rg "^[^[:space:]].*:[0-9]+:[0-9]+: (error|warning):|^Test Case .* failed|Executed [0-9]+ tests?|TEST (SUCCEEDED|FAILED)" "$log" | tail -40 || true
+  if [[ $code -eq 0 ]] && ! rg -q "Executed [1-9][0-9]* tests?" "$log"; then echo "No tests ran; see $log" >&2; exit 1; fi
+  if [[ $code -ne 0 ]]; then echo "Tests failed; see $log" >&2; exit "$code"; fi
+done
