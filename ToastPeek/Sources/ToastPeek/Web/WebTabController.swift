@@ -1203,7 +1203,9 @@ enum BrowserEngineBridge {
     static func clearBrowsingData(dataStoreID: UUID, completion: @escaping @MainActor @Sendable () -> Void = {}) {
         let store = WKWebsiteDataStore(forIdentifier: dataStoreID)
         store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                         modifiedSince: .distantPast, completionHandler: completion)
+                         modifiedSince: .distantPast) {
+            Task { @MainActor in completion() }
+        }
     }
     static func deleteDataStore(dataStoreID: UUID) {
         WKWebsiteDataStore.remove(forIdentifier: dataStoreID) { error in

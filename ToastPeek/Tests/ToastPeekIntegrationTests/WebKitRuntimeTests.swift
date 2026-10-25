@@ -167,7 +167,20 @@ final class WebKitRuntimeTests: XCTestCase {
         }
         XCTAssertTrue(store.downloadManager.canRetry(item.id))
         store.downloadManager.retry(item.id)
-        try await waitUntil(label: "resumed transfer did not complete") { self.store.downloads.contains { $0.state == "completed" } }
+        // Older WebKit on a shared CI runner can spend several seconds
+        // reconnecting before transferring this fixture. Keep the byte check
+        // below, but allow that startup separately from the fixture's 3 s body.
+        do {
+            try await waitUntil(timeout: 30, label: "resumed transfer did not complete") {
+                self.store.downloads.contains { $0.state == "completed" || $0.state == "failed" }
+            }
+        } catch {
+            XCTFail("Resume state: " + store.downloads.map {
+                "\($0.state), \($0.receivedBytes)/\($0.totalBytes) bytes, \($0.errorDescription ?? "no error")"
+            }.joined(separator: "; "))
+            throw error
+        }
+        XCTAssertFalse(store.downloads.contains { $0.state == "failed" }, store.downloads.compactMap(\.errorDescription).joined(separator: "; "))
         let complete = try XCTUnwrap(store.downloads.first { $0.state == "completed" })
         XCTAssertEqual(complete.urlString, base + "/download/slow")
         let data = try Data(contentsOf: URL(fileURLWithPath: complete.fullPath))
