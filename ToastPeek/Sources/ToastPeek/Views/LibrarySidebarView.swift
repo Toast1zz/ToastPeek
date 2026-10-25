@@ -417,16 +417,23 @@ private struct MediaTile: View {
         .task(id: record.fullPath) { image = await Self.thumbnail(record.fileURL) }
     }
 
-    /// Small decoded thumbnail, off the main thread.
+    /// Decode a bounded thumbnail off the main actor; create AppKit objects on it.
+    @MainActor
     static func thumbnail(_ url: URL) async -> NSImage? {
-        await Task.detached(priority: .utility) { () -> NSImage? in
+        let data = await Task.detached(priority: .utility) { () -> Data? in
             guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceThumbnailMaxPixelSize: 360,
                   ] as CFDictionary) else { return nil }
-            return NSImage(cgImage: cg, size: .zero)
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil)
+            else { return nil }
+            CGImageDestinationAddImage(destination, cg, nil)
+            guard CGImageDestinationFinalize(destination) else { return nil }
+            return data as Data
         }.value
+        return data.flatMap { NSImage(data: $0) }
     }
 }
 
