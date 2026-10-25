@@ -23,7 +23,7 @@ Build verification checks both CPU slices, bundle signatures and extracted local
 
 ## Remaining limits
 
-- A blank GitHub release page was observed in an older signed-in instance while its accessibility tree still contained page content. The same URL rendered in isolated profiles. The confirmed page-owner bugs are fixed; the original session's final trigger is still unconfirmed.
+- A blank GitHub release page was observed in an older signed-in instance while its accessibility tree still contained page content. The same URL rendered in isolated profiles. After installing 1.0.2, the restored signed-in tab also rendered and remained visible after refresh. The confirmed page-owner bugs are fixed; the original session's final trigger is still unconfirmed.
 - Display diagnostics record lifecycle events, profile/tab IDs and view geometry in `presentation.jsonl`, without page URLs, text, cookies or form input. The file rotates at roughly 2 MB. Valid geometry does not prove that WebKit's compositing output is correct.
 - Window Space and pane targeting are improved, but command-bar/find presentation state is still partly shared. Complete restoration of every window and split after restart is not implemented.
 - Download resume data is kept only in memory and bounded. The app does not promise resumable downloads across restart.
