@@ -17,7 +17,7 @@ xcodebuild -project ToastPeek.xcodeproj -scheme ToastPeek -configuration "$CONFI
   -derivedDataPath "$OUT/DerivedData" build > "$OUT/build.log" 2>&1
 code=$?
 set -e
-rg "(^|[[:space:]])(error|warning):" "$OUT/build.log" | sort -u | head -60 || true
+grep -E "(^|[[:space:]])(error|warning):" "$OUT/build.log" | sort -u | head -60 || true
 if [ $code -ne 0 ]; then echo "BUILD FAILED (see $OUT/build.log)"; exit $code; fi
 APP="$OUT/DerivedData/Build/Products/$CONFIG/ToastPeek.app"
 codesign --verify --deep --strict "$APP"

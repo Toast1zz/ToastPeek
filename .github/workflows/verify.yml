@@ -9,6 +9,8 @@ jobs:
   macos:
     runs-on: macos-15
     timeout-minutes: 20
+    env:
+      TOASTPEEK_BUILD_DIR: ${{ runner.temp }}/toastpeek-build
     steps:
       - uses: actions/checkout@v4
       - name: Install project generator
@@ -17,3 +19,10 @@ jobs:
         run: scripts/test.sh
       - name: Strict arm64 and universal packages
         run: scripts/package.sh
+      - name: Upload build and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-logs
+          path: ${{ runner.temp }}/toastpeek-build/**/*.log
+          if-no-files-found: warn
