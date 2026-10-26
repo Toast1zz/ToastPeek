@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 
 /// The Library: the button at the sidebar's bottom-left turns the sidebar
@@ -276,38 +277,59 @@ private struct FileIcon: View {
         }
         .task(id: [path, fileName]) {
             icon = nil
-            let loaded = await LibraryFileIcons.load(path: path, fileName: fileName)
+            let data = await LibraryFileIcons.load(path: path, fileName: fileName)
             guard !Task.isCancelled else { return }
-            icon = loaded
+            icon = data.flatMap { NSImage(data: $0) }
         }
     }
 }
 
 /// Icon Services may synchronously inspect a file or contact another process
 /// (notably for disk images). Keep that work out of SwiftUI's render pass.
-private enum LibraryFileIcons {
+enum LibraryFileIcons {
     private static let queue = DispatchQueue(label: "app.toastpeek.library-icons", qos: .utility)
     // Every cache access runs on queue; no mutable cache state escapes it.
-    nonisolated(unsafe) private static let cache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
+    nonisolated(unsafe) private static let cache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
         cache.countLimit = 256
         return cache
     }()
 
-    static func load(path: String, fileName: String) async -> NSImage {
+    static func load(path: String, fileName: String) async -> Data? {
         await withCheckedContinuation { continuation in
             queue.async {
                 let ext = (fileName as NSString).pathExtension.lowercased()
                 let key = (path.isEmpty ? "type:\(ext)" : "file:\(path)") as NSString
                 if let cached = cache.object(forKey: key) {
-                    continuation.resume(returning: cached)
+                    continuation.resume(returning: cached as Data)
                     return
                 }
                 let exists = !path.isEmpty && FileManager.default.fileExists(atPath: path)
                 let icon = exists ? NSWorkspace.shared.icon(forFile: path)
                     : NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
-                cache.setObject(icon, forKey: key)
-                continuation.resume(returning: icon)
+                // Resolve lazy icon representations here as well. Only a small
+                // immutable PNG crosses back to the main actor, never NSImage.
+                guard let tiff = icon.tiffRepresentation,
+                      let source = CGImageSourceCreateWithData(tiff as CFData, nil),
+                      let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceThumbnailMaxPixelSize: 64,
+                      ] as CFDictionary) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let data = NSMutableData()
+                guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                CGImageDestinationAddImage(destination, thumbnail, nil)
+                guard CGImageDestinationFinalize(destination) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                cache.setObject(data, forKey: key)
+                continuation.resume(returning: data as Data)
             }
         }
     }
