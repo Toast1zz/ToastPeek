@@ -118,6 +118,84 @@ final class WebKitRuntimeTests: XCTestCase {
         XCTAssertEqual(store.history.first?.urlString, base + "/page")
     }
 
+    private func iconRequests() throws -> [[String: String]] {
+        let data = try String(contentsOf: root.appendingPathComponent("requests.jsonl"), encoding: .utf8)
+        return try data.split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: String])
+        }
+    }
+
+    func testFaviconUsesOwningProfileAndCapturedNativeAPIs() async throws {
+        let first = try await show("/page")
+        _ = try await js(first, "document.cookie='identity=alpha;path=/';window.fetch=()=>Promise.reject('page override');window.btoa=()=>'';true")
+        let red = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/authenticated")), in: try XCTUnwrap(first.webView))
+        XCTAssertNotNil(red)
+        let secondSpace = BrowserSpace(name: "Isolated icons", icon: "house", colorHex: "#7C6FF0")
+        store.spaces.append(secondSpace)
+        store.currentSpaceID = secondSpace.id
+        let second = try await show("/page")
+        let blue = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/authenticated")), in: try XCTUnwrap(second.webView))
+        XCTAssertNotNil(blue)
+        XCTAssertNotEqual(red, blue)
+        let requests = try iconRequests().filter { $0["path"] == "/icon/authenticated" }
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertTrue(requests[0]["cookie"]?.contains("identity=alpha") == true)
+        XCTAssertFalse(requests[1]["cookie"]?.contains("identity=alpha") == true)
+    }
+
+    func testFaviconRespectsWebKitContentRules() async throws {
+        let c = try await show("/page")
+        let view = try XCTUnwrap(c.webView)
+        let identifier = "toastpeek-test-icon-" + UUID().uuidString
+        let rules = """
+        [{"trigger":{"url-filter":"/icon/blocked", "resource-type":["raw"]},"action":{"type":"block"}}]
+        """
+        let list: WKContentRuleList = try await withCheckedThrowingContinuation { continuation in
+            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: rules) { list, error in
+                if let list { continuation.resume(returning: list) }
+                else { continuation.resume(throwing: error ?? NSError(domain: "IconRule", code: 1)) }
+            }
+        }
+        view.configuration.userContentController.add(list)
+        defer {
+            view.configuration.userContentController.remove(list)
+            WKContentRuleListStore.default().removeContentRuleList(forIdentifier: identifier) { _ in }
+        }
+        let data = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/blocked")), in: view)
+        XCTAssertNil(data)
+        XCTAssertFalse(try iconRequests().contains { $0["path"] == "/icon/blocked" })
+    }
+
+    func testFaviconRefusesCrossOriginLinksAndRedirects() async throws {
+        let c = try await show("/page")
+        let view = try XCTUnwrap(c.webView)
+        let crossOrigin = base.replacingOccurrences(of: "127.0.0.1", with: "localhost") + "/icon/cross-origin"
+        let direct = await FaviconLoader.fetch(try XCTUnwrap(URL(string: crossOrigin)), in: view)
+        XCTAssertNil(direct)
+        let redirect = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/redirect")), in: view)
+        XCTAssertNil(redirect)
+        let paths = try iconRequests().compactMap { $0["path"] }
+        XCTAssertTrue(paths.contains("/icon/redirect"))
+        XCTAssertFalse(paths.contains("/icon/redirect-target"))
+        XCTAssertFalse(paths.contains("/icon/cross-origin"))
+    }
+
+    func testFaviconRejectsOversizedStreamWithoutContentLength() async throws {
+        let c = try await show("/page")
+        let data = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/oversized")), in: try XCTUnwrap(c.webView))
+        XCTAssertNil(data)
+    }
+
+    func testInvalidLinkedFaviconFallsBackToOriginIcon() async throws {
+        let c = try await show("/favicon-page")
+        let key = try XCTUnwrap(FaviconKey(url: try XCTUnwrap(c.webView?.url), profileID: c.dataStoreID))
+        let slot = store.faviconStore.slot(for: key)
+        try await waitUntil(label: "invalid icon prevented fallback") { slot.image != nil }
+        let paths = try iconRequests().compactMap { $0["path"] }
+        XCTAssertTrue(paths.contains("/icon/invalid"))
+        XCTAssertTrue(paths.contains("/favicon.ico"))
+    }
+
     func testAutomaticPopupIsBlockedByWebKit() async throws {
         let c = try await show("/auto-popup")
         let jsResult3 = try await js(c, "window.result")
@@ -193,6 +271,9 @@ final class WebKitRuntimeTests: XCTestCase {
         var c: WebTabController? = try await show("/page")
         _ = try await js(try XCTUnwrap(c), "document.cookie='deleted_identity=yes;path=/'")
         let oldSpace = store.spaces[0]
+        let iconKey = try XCTUnwrap(FaviconKey(url: URL(string: base)!, profileID: oldSpace.dataStoreID))
+        let icon = store.faviconStore.slot(for: iconKey)
+        try await waitUntil(label: "profile icon did not load") { icon.image != nil }
         let second = BrowserSpace(name: "Surviving identity", icon: "house", colorHex: "#7C6FF0")
         store.spaces.append(second)
         let releasedView = WeakView(c?.webView)
@@ -205,6 +286,9 @@ final class WebKitRuntimeTests: XCTestCase {
             XCTFail("Profile cleanup: " + (store.toast ?? "no error") + "; " + (store.persistenceError ?? "no persistence error"))
             throw error
         }
+        XCTAssertNil(icon.image)
+        let iconFiles = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Favicons").path)
+        XCTAssertFalse(iconFiles.contains { $0.hasPrefix(oldSpace.dataStoreID.uuidString + ".") })
         XCTAssertTrue(store.flush())
         let saved = try XCTUnwrap(StateFile.decode(Data(contentsOf: root.appendingPathComponent("state.json"))))
         XCTAssertTrue(saved.pendingDataStoreDeletions?.isEmpty == true)

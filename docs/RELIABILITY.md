@@ -1,8 +1,17 @@
-# Reliability notes for 1.0.2
+# Reliability notes for 1.0.3
 
 This release fixes browser lifecycle and data-handling problems without redesigning the interface. It remains an early-stage browser.
 
-## Changes
+Version 1.0.3 scopes favicon caching and requests to the owning profile and origin. See [the October 26 audit record](AUDIT_FOLLOWUP_2026-10-26.md) for validation and compatibility limits. Local verification passed 52 tests through `scripts/test.sh headless`, including real WebKit requests without showing windows. The full core, AppKit and WebKit suites run in CI.
+
+## Changes in 1.0.3
+
+- Cache keys include the profile and complete origin, so icons are not shared across accounts, schemes or ports.
+- Icon requests use the owning page's cookies, content rules and CSP connect-src policy. Native APIs are captured at document start before site scripts can replace them. Cross-origin URLs and redirects are refused.
+- An invalid linked icon falls back to the same origin's `/favicon.ico`. Responses stay within 512 KiB, and accepted images are reduced to thumbnails of at most 64 px.
+- Removing a Space waits for its profile's icon files to be cleared. Clearing icons invalidates outstanding results and retained image slots.
+
+## Reliability fixes retained from 1.0.2
 
 - A live page has one window/pane owner. An old host cannot detach or resize a page after it moves to another host. Initial SwiftUI mounting retries once the window is registered and has usable dimensions.
 - Tabs retain their website-data-store identity when they become Favorites or pinned tabs, or when Spaces are reordered. Permission decisions include the profile and complete origin, including the port. Certificate exceptions are session-only and scoped to profile, origin and certificate fingerprint.
@@ -15,7 +24,7 @@ This release fixes browser lifecycle and data-handling problems without redesign
 
 ## Validation
 
-The public source passed 64 tests after integrating the fixes with the current repository: 36 core tests and 28 integration tests. The core suite covers state loading, backup recovery, schema handling, permissions, URL resolution and models. The integration suite exercises real BrowserStore/AppKit ownership and SQLite import, plus 15 tests running WKWebView.
+The 1.0.2 release passed 64 tests after integrating its reliability fixes: 36 core tests and 28 integration tests. The core suite covers state loading, backup recovery, schema handling, permissions, URL resolution and models. The integration suite exercises real BrowserStore/AppKit ownership and SQLite import, plus 15 tests running WKWebView.
 
 Runtime checks include screenshots of a rendered fixture, private-world script isolation, automatic popup blocking, simultaneous downloads after source-tab closure, cancellation cleanup and byte-for-byte resume, cookie cleanup and pending cleanup after restart, stable profile identity, cross-host page transfer, OfflineAudioContext mute/disconnect behavior, rapid content-rule changes, preserved form values after CSS editing, initial SwiftUI window display, WebArchive and multi-page PDF output.
 
@@ -27,7 +36,7 @@ Build verification checks both CPU slices, bundle signatures and extracted local
 - Display diagnostics record lifecycle events, profile/tab IDs and view geometry in `presentation.jsonl`, without page URLs, text, cookies or form input. The file rotates at roughly 2 MB. Valid geometry does not prove that WebKit's compositing output is correct.
 - Window Space and pane targeting are improved, but command-bar/find presentation state is still partly shared. Complete restoration of every window and split after restart is not implemented.
 - Download resume data is kept only in memory and bounded. The app does not promise resumable downloads across restart.
-- Favicon traffic is anonymous and bounded, but it remains separate from the page's website-data-store and content-rule context.
+- Favicon requests capture native APIs at document start and run in the owning page world, using its cookies, content rules and CSP connect-src policy. Only same-origin HTTP(S) icon links are accepted; redirects are refused. Icons available only from another origin may show the globe placeholder. History and Boost entries lack a stored profile and use the placeholder. The old host-only cache is ignored; Clear Browsing Data still removes it.
 - Device capture, certificate-rotation attacks, every popup/upload variant, complex print layouts, authenticated workflows and DRM need further site/device testing. Passing the current tests does not establish those results.
 - Cookie/data clearing waits for WebKit and retains a durable cleanup intent. It does not promise secure erasure of system backups, preserved corrupt recovery files or all operating-system traces.
 - There is no Chrome/Safari extension support, password manager or sync. Long-duration resource testing, minimum-system testing and physical Intel Mac validation remain incomplete. Public archives are ad-hoc signed and not notarized.

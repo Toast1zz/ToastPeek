@@ -173,6 +173,7 @@ final class BrowserStore: ObservableObject {
     var isReadOnly: Bool { !stateWritesAllowed }
     var canLoadWebContent: Bool { !isClearingData && !pendingCleanup }
     lazy var downloadManager = DownloadManager(store: self)
+    let faviconStore: FaviconStore
     var dataFileURL: URL { stateFile.primary }
     private var saveWorkItem: DispatchWorkItem?
     private var lastBackupAt = Date.distantPast
@@ -193,6 +194,7 @@ final class BrowserStore: ObservableObject {
     }
 
     init(stateURL: URL = AppPaths.support.appendingPathComponent("state.json")) {
+        faviconStore = FaviconStore(directory: stateURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         stateFile = StateFile(primary: stateURL)
         writeLease = StateWriteLease(url: stateURL)
         stateWritesAllowed = writeLease.acquired
@@ -860,7 +862,7 @@ final class BrowserStore: ObservableObject {
         let group = DispatchGroup()
         var cleanupError: String?
         group.enter()
-        FaviconStore.shared.removeAll { result in
+        faviconStore.removeAll { result in
             if case .failure(let error) = result { cleanupError = error.localizedDescription }
             group.leave()
         }
@@ -1314,8 +1316,8 @@ final class BrowserStore: ObservableObject {
                     let errorMessage = error?.localizedDescription
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.deletingDataStores.remove(id)
                         if let errorMessage {
+                            self.deletingDataStores.remove(id)
                             self.toast = errorMessage
                             // WebKit may still be releasing a just-closed view.
                             // Retry a bounded burst, keeping the durable intent
@@ -1326,9 +1328,19 @@ final class BrowserStore: ObservableObject {
                                 }
                             }
                         } else {
-                            self.pendingDataStoreDeletions.remove(id)
-                            self.dataStoreDeletionAttempts.removeValue(forKey: id)
-                            self.scheduleSave()
+                            self.faviconStore.remove(profileID: id) { [weak self] result in
+                                guard let self else { return }
+                                self.deletingDataStores.remove(id)
+                                switch result {
+                                case .success:
+                                    self.pendingDataStoreDeletions.remove(id)
+                                    self.dataStoreDeletionAttempts.removeValue(forKey: id)
+                                    self.scheduleSave()
+                                case .failure(let error):
+                                    // Keep the durable intent so a later launch retries.
+                                    self.toast = error.localizedDescription
+                                }
+                            }
                         }
                     }
                 }

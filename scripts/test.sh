@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run core logic and real AppKit/WebKit integration tests.
-#   scripts/test.sh
+#   scripts/test.sh [core|integration|headless]
+# headless runs core, favicon and import tests without creating a window.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TOASTPEEK_BUILD_DIR:-$HOME/Developer/Builds/ToastPeek}"
@@ -14,9 +15,15 @@ xcodegen generate --quiet
 schemes=(ToastPeekTests ToastPeekIntegrationTests)
 if [[ "${1:-}" == "core" ]]; then schemes=(ToastPeekTests); fi
 if [[ "${1:-}" == "integration" ]]; then schemes=(ToastPeekIntegrationTests); fi
-test_args=(test)
-if [[ -n "${TOASTPEEK_TEST_FILTER:-}" ]]; then test_args+=("-only-testing:$TOASTPEEK_TEST_FILTER"); fi
 for scheme in "${schemes[@]}"; do
+  test_args=(test)
+  if [[ -n "${TOASTPEEK_TEST_FILTER:-}" ]]; then
+    test_args+=("-only-testing:$TOASTPEEK_TEST_FILTER")
+  elif [[ "${1:-}" == "headless" && "$scheme" == "ToastPeekIntegrationTests" ]]; then
+    test_args+=("-only-testing:ToastPeekIntegrationTests/FaviconStoreTests"
+                "-only-testing:ToastPeekIntegrationTests/FaviconHeadlessTests"
+                "-only-testing:ToastPeekIntegrationTests/ImportRegressionTests")
+  fi
   log="$OUT/$scheme.log"
   set +e
   xcodebuild -project ToastPeek.xcodeproj -scheme "$scheme" -destination 'platform=macOS,arch=arm64' \

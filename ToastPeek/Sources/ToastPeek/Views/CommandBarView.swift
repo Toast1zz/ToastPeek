@@ -73,7 +73,7 @@ struct CommandBarView: View {
     @FocusState private var focused: Bool
     @Environment(\.colorScheme) private var scheme
 
-    private enum Icon { case favicon(String), symbol(String) }
+    private enum Icon { case favicon(FaviconKey?), symbol(String) }
 
     private struct Hit: Identifiable {
         let id: String
@@ -101,7 +101,7 @@ struct CommandBarView: View {
             guard s >= 0 else { continue }
             let spaceName = t.kind == .favorite ? String(localized: "Favorite") : store.space(for: t).name
             tabHits.append((s + (t.kind == .today ? 0 : 6), Hit(
-                id: "tab-\(t.id)", icon: .favicon(t.host), title: t.displayTitle,
+                id: "tab-\(t.id)", icon: .favicon(store.faviconKey(for: t)), title: t.displayTitle,
                 subtitle: t.displayHost, hint: String(localized: "Switch to Tab · \(spaceName)")) { store.select(t); dismiss() }))
         }
         out += tabHits.sorted { $0.0 > $1.0 }.prefix(4).map(\.1)
@@ -114,12 +114,11 @@ struct CommandBarView: View {
         var historyHits: [(Int, Hit)] = []
         var seen = Set(out.map(\.subtitle))
         for h in store.history.prefix(2000) {
-            let host = URL(string: h.urlString)?.host ?? ""
             let s = max(FuzzyMatch.score(query: q, candidate: h.title) ?? -1,
                         FuzzyMatch.score(query: q, candidate: h.urlString) ?? -1)
             guard s >= 0, !seen.contains(h.urlString) else { continue }
             seen.insert(h.urlString)
-            historyHits.append((s, Hit(id: "hist-\(h.id)", icon: .favicon(host),
+            historyHits.append((s, Hit(id: "hist-\(h.id)", icon: .favicon(nil),
                                        title: h.title.isEmpty ? h.urlString : h.title,
                                        subtitle: h.urlString, hint: "") { run(h.urlString) }))
         }
@@ -136,7 +135,8 @@ struct CommandBarView: View {
 
     private func primaryHit(for q: String) -> Hit {
         if URLResolver.looksLikeURL(q), let url = URLResolver.resolve(q, engine: store.searchEngine) {
-            return Hit(id: "primary", icon: .favicon(url.host ?? ""), title: url.absoluteString
+            let profileID = store.commandTargetTab.map { store.profileSpace(for: $0).dataStoreID } ?? store.currentSpace.dataStoreID
+            return Hit(id: "primary", icon: .favicon(FaviconKey(url: url, profileID: profileID)), title: url.absoluteString
                 .replacingOccurrences(of: "https://", with: ""),
                        subtitle: "", hint: mode == .editCurrent ? String(localized: "Open") : String(localized: "Open in New Tab")) { run(q) }
         }
@@ -149,7 +149,7 @@ struct CommandBarView: View {
             .sorted { $0.lastVisitedAt > $1.lastVisitedAt }
             .prefix(7)
             .map { t in
-                Hit(id: "recent-\(t.id)", icon: .favicon(t.host), title: t.displayTitle,
+                Hit(id: "recent-\(t.id)", icon: .favicon(store.faviconKey(for: t)), title: t.displayTitle,
                     subtitle: t.displayHost,
                     hint: t.kind == .favorite ? String(localized: "Favorite") : store.space(for: t).name) { store.select(t); dismiss() }
             }
@@ -258,7 +258,7 @@ struct CommandBarView: View {
         HStack(spacing: 10) {
             Group {
                 switch hit.icon {
-                case .favicon(let host): FaviconView(host: host, size: 16)
+                case .favicon(let key): FaviconView(key: key, size: 16)
                 case .symbol(let name):
                     Image(systemName: name).font(.system(size: 13, weight: .medium))
                         .foregroundStyle(selected ? Color.white : Color.secondary)
