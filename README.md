@@ -53,7 +53,7 @@ The trade-off is that Chrome extensions do not work in ToastPeek, and the app do
 - Release builds are ad-hoc signed and not notarized.
 - The Intel (x86_64) code has not been tested on an Intel Mac.
 
-Version 1.0.2 fixes several page-hosting problems, but an intermittent blank GitHub page seen in an older, signed-in session has not been conclusively diagnosed. See [reliability notes](docs/RELIABILITY.md) for the fixes, test coverage and remaining limits.
+Version 1.0.3 isolates favicon caches by profile and origin, keeps icon requests within the page's cookie and security context, and reduces cached image dimensions. The page-hosting fixes from 1.0.2 remain; an intermittent blank GitHub page seen in an older, signed-in session has not been conclusively diagnosed. See [reliability notes](docs/RELIABILITY.md) for the fixes, test coverage and remaining limits.
 
 ## Build from source
 
@@ -63,7 +63,8 @@ Requirements: Xcode (developed with Xcode 27) and [XcodeGen](https://github.com/
 git clone https://github.com/Toast1zz/ToastPeek.git
 cd ToastPeek
 scripts/build.sh release     # universal Release build
-scripts/test.sh              # core and real AppKit/WebKit tests
+scripts/test.sh              # core and real AppKit/WebKit tests (shows test windows)
+scripts/test.sh headless     # core, favicon and import tests without test windows
 scripts/package.sh           # arm64 and universal public Release archives
 ```
 

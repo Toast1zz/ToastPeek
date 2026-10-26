@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Loopback-only pages for repeatable WebKit integration tests; no external traffic."""
 import http.server
+import struct
+import zlib
 import json
 from pathlib import Path
 import sys
 import time
 import urllib.parse
+
+def png(red, green, blue):
+    def chunk(kind, payload):
+        return struct.pack('>I', len(payload)) + kind + payload + struct.pack('>I', zlib.crc32(kind + payload))
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>2I5B', 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(bytes([0, red, green, blue]))) + chunk(b'IEND', b''))
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -13,6 +21,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+        with Path(sys.argv[1]).with_name('requests.jsonl').open('a') as log:
+            log.write(json.dumps({'path': self.path, 'cookie': self.headers.get('Cookie', '')}) + '\n')
+        if path == '/icon/redirect':
+            self.send_response(302)
+            self.send_header('Location', f'http://localhost:{self.server.server_port}/icon/redirect-target')
+            self.end_headers()
+            return
+        if path == '/icon/stalled':
+            payload = png(0, 0, 255)
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(8)
+            try:
+                self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if path.startswith('/icon/') or path == '/favicon.ico':
+            payload = (b'x' * 524289 if path == '/icon/oversized' else b'x' * 524288 if path == '/icon/exact-size' else b'not an image' if path == '/icon/invalid'
+                       else png(255, 0, 0) if 'identity=alpha' in self.headers.get('Cookie', '') else png(0, 0, 255))
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Cache-Control', 'no-store')
+            # The oversized fixture omits a length to exercise the stream limit.
+            if path != '/icon/oversized':
+                self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            try:
+                self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         if path.startswith('/download/'):
             payload = (path.rsplit('/', 1)[-1] + '\n').encode() * (262144 if path.endswith('/slow') else 32768)
             start = 0
@@ -36,7 +79,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
-        if path == '/auto-popup':
+        if path == '/favicon-page':
+            body = '<link rel="icon" href="/icon/invalid"><h1>Fallback icon fixture</h1>'
+        elif path == '/auto-popup':
             body = '<h1>Automatic popup test</h1><script>window.result=window.open("/child")===null</script>'
         elif path == '/long':
             body = ''.join(f'<p style="height:100px">Printed paragraph {i}</p>' for i in range(35))
@@ -53,6 +98,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 '</head><body>' + body + '</body></html>').encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
+        if path == '/icon-csp-page':
+            self.send_header('Content-Security-Policy', "default-src 'none'; connect-src 'none'")
         self.send_header('Content-Length', str(len(page)))
         self.end_headers()
         self.wfile.write(page)

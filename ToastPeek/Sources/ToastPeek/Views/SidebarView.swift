@@ -507,7 +507,7 @@ private struct FavoriteTile: View {
         let selected = windowState.selectedTabID == tab.id
         let style = SidebarStyle(scheme: scheme)
         let loaded = store.controller(forTabID: tab.id)?.hasBrowser == true
-        FaviconView(host: tab.host, size: 20)
+        FaviconView(key: store.faviconKey(for: tab), size: 20)
             .opacity(loaded || selected ? 1 : 0.85)
             .frame(maxWidth: .infinity)
             .frame(height: 48)
@@ -692,17 +692,18 @@ private struct DropStrip: View {
 
 /// Favicon that dims behind a small spinner while the tab loads.
 private struct RowIcon: View {
+    @EnvironmentObject var store: BrowserStore
     let tab: BrowserTab
     let controller: WebTabController?
     var body: some View {
-        if let controller { Live(host: tab.host, controller: controller) } else { FaviconView(host: tab.host, size: 16) }
+        if let controller { Live(key: store.faviconKey(for: tab), controller: controller) } else { FaviconView(key: store.faviconKey(for: tab), size: 16) }
     }
     private struct Live: View {
-        let host: String
+        let key: FaviconKey?
         @ObservedObject var controller: WebTabController
         var body: some View {
             ZStack {
-                FaviconView(host: host, size: 16).opacity(controller.isLoading ? 0.3 : 1)
+                FaviconView(key: key, size: 16).opacity(controller.isLoading ? 0.3 : 1)
                 if controller.isLoading {
                     ProgressView().controlSize(.mini).scaleEffect(0.65).transition(.opacity)
                 }

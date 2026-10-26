@@ -45,7 +45,6 @@ private func dayTitle(_ date: Date) -> String {
 }
 
 private struct LibraryRow<Accessory: View>: View {
-    let host: String
     let title: String
     let subtitle: String
     let time: Date
@@ -55,7 +54,7 @@ private struct LibraryRow<Accessory: View>: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            FaviconView(host: host, size: 16)
+            FaviconView(key: nil, size: 16)
             Text(title).font(.system(size: 13)).lineLimit(1)
             Text(subtitle).font(.system(size: 12)).foregroundStyle(Color.secondary).lineLimit(1)
             Spacer(minLength: 12)
@@ -107,7 +106,7 @@ struct HistoryView: View {
                             Section {
                                 ForEach(entries) { entry in
                                     let url = URL(string: entry.urlString)
-                                    LibraryRow(host: url?.host ?? "", title: entry.title.isEmpty ? entry.urlString : entry.title,
+                                    LibraryRow(title: entry.title.isEmpty ? entry.urlString : entry.title,
                                                subtitle: url?.host ?? "", time: entry.visitedAt) {
                                         store.open(entry.urlString)
                                     } accessory: {

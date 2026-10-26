@@ -122,7 +122,7 @@ struct SiteControlsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                FaviconView(host: host, size: 20)
+                FaviconView(key: store.faviconKey(for: tab), size: 20)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(BrowserStore.siteKey(host)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Text(secure ? "Connection is secure" : "Connection is not secure")

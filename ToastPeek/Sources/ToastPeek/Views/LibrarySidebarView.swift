@@ -487,7 +487,7 @@ private struct BoostsList: View {
                         let boost = store.boosts[i]
                         LibraryRow(title: boost.name.isEmpty ? boost.hostPattern : boost.name,
                                    subtitle: boost.hostPattern, action: { store.onOpenSettings?(.boosts) }) {
-                            FaviconView(host: boost.normalizedPattern, size: 18)
+                            FaviconView(key: nil, size: 18)
                                 .frame(width: 30, height: 30)
                                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         } trailing: {
@@ -523,7 +523,7 @@ private struct ArchivedList: View {
                         ForEach(group) { tab in
                             LibraryRow(title: tab.displayTitle, subtitle: tab.displayHost,
                                        action: { restore(tab) }) {
-                                FaviconView(host: tab.host, size: 18).frame(width: 30, height: 30)
+                                FaviconView(key: store.faviconKey(for: tab), size: 18).frame(width: 30, height: 30)
                             } trailing: {
                                 EmptyView()
                             }

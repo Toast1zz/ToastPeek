@@ -503,7 +503,7 @@ struct BoostsSettingsView: View {
             ForEach($store.boosts) { $boost in
                 ControlCard {
                     HStack(spacing: 12) {
-                        FaviconView(host: boost.normalizedPattern, size: 20)
+                        FaviconView(key: nil, size: 20)
                             .frame(width: 26, height: 26)
                         VStack(alignment: .leading, spacing: 2) {
                             TextField("", text: $boost.name, prompt: Text("Name"))
@@ -576,7 +576,7 @@ struct PrivacySettingsView: View {
                 ForEach(Array(store.sitePermissions.enumerated()), id: \.element.id) { index, perm in
                     if index > 0 { RowDivider(inset: 54) }
                     HStack(spacing: 12) {
-                        FaviconView(host: URL(string: perm.origin)?.host ?? "", size: 18).frame(width: 26, height: 26)
+                        FaviconView(key: URL(string: perm.origin).flatMap { FaviconKey(url: $0, profileID: perm.profileID) }, size: 18).frame(width: 26, height: 26)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(URL(string: perm.origin)?.host ?? perm.origin).font(.system(size: 13.5)).lineLimit(1)
                             Text(Self.summary(perm)).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)

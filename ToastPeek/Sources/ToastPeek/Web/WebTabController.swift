@@ -628,6 +628,7 @@ final class WebTabController: NSObject, ObservableObject,
         guard let wv = webView else { return }
         let ucc = wv.configuration.userContentController
         ucc.removeAllUserScripts()
+        ucc.addUserScript(FaviconLoader.userScript)
         ucc.addUserScript(WKUserScript(source: Self.mediaScriptSource,
                                        injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Self.browserWorld))
         ucc.addUserScript(WKUserScript(source: Self.contextScriptSource,
@@ -1168,27 +1169,30 @@ final class WebTabController: NSObject, ObservableObject,
         load(target)
     }
 
-    // MARK: Favicon (WKWebView reports none; fetch the page's icon link)
+    // MARK: Favicon
 
     private func fetchFavicon() {
         faviconTask?.cancel()
-        guard let wv = webView, let pageURL = URL(string: currentURLString),
-              let host = pageURL.host, ["http", "https"].contains(pageURL.scheme ?? "") else { return }
+        guard let view = webView, let pageURL = view.url,
+              let key = FaviconKey(url: pageURL, profileID: dataStoreID) else { return }
         let navigation = navigationGeneration
-        let cacheGeneration = FaviconStore.shared.generation
-        wv.evaluateJavaScript("(()=>{var l=document.querySelector('link[rel~=\"icon\"]');return l?l.href:'';})()") { [weak self] result, _ in
-            guard let self, self.navigationGeneration == navigation else { return }
+        guard let cache = store?.faviconStore else { return }
+        let cacheGeneration = cache.generation
+        faviconTask = Task { @MainActor [weak self, weak view] in
+            guard let view else { return }
+            let result = try? await view.callAsyncJavaScript(
+                "return document.querySelector('link[rel~=\"icon\"]')?.href ?? ''", arguments: [:], in: nil, contentWorld: .defaultClient)
             var candidates: [URL] = []
-            if let href = result as? String, let url = URL(string: href), ["http", "https"].contains(url.scheme ?? "") { candidates.append(url) }
-            if let base = URL(string: "/favicon.ico", relativeTo: pageURL)?.absoluteURL { candidates.append(base) }
-            self.faviconTask = Task { @MainActor [weak self] in
-                for url in candidates.prefix(2) {
-                    guard !Task.isCancelled else { return }
-                    if let data = await FaviconLoader.fetch(url), !Task.isCancelled {
-                        guard let self, self.navigationGeneration == navigation else { return }
-                        FaviconStore.shared.store(data, forHost: host, generation: cacheGeneration)
-                        return
-                    }
+            if let href = result as? String, let url = URL(string: href),
+               SiteOrigin.make(url) == key.origin { candidates.append(url) }
+            if let fallback = URL(string: "/favicon.ico", relativeTo: pageURL)?.absoluteURL,
+               !candidates.contains(fallback) { candidates.append(fallback) }
+            for url in candidates {
+                guard !Task.isCancelled, self?.navigationGeneration == navigation,
+                      cache.generation == cacheGeneration else { return }
+                if let data = await FaviconLoader.fetch(url, in: view) {
+                    guard !Task.isCancelled, self?.navigationGeneration == navigation else { return }
+                    if cache.store(data, for: key, generation: cacheGeneration) { return }
                 }
             }
         }
