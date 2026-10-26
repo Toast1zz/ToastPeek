@@ -21,7 +21,7 @@ final class ToastPeekApplication: NSApplication {
     }
 }
 
-let delegate = ToastPeekAppDelegate()
+let delegate = MainActor.assumeIsolated { ToastPeekAppDelegate() }
 // Take the shared instance THROUGH the subclass so the singleton is a
 // ToastPeekApplication regardless of Info.plist lookup timing.
 let app = ToastPeekApplication.shared

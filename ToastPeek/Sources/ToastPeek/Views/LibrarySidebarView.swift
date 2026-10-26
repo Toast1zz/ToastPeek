@@ -264,13 +264,52 @@ private struct LibraryRow<Icon: View, Trailing: View>: View {
 private struct FileIcon: View {
     let path: String
     let fileName: String
+    @State private var icon: NSImage?
+
     var body: some View {
-        let exists = !path.isEmpty && FileManager.default.fileExists(atPath: path)
-        Image(nsImage: exists ? NSWorkspace.shared.icon(forFile: path)
-              : NSWorkspace.shared.icon(for: UTType(filenameExtension: (fileName as NSString).pathExtension) ?? .data))
-            .resizable()
-            .interpolation(.high)
-            .scaledToFit()
+        Group {
+            if let icon {
+                Image(nsImage: icon).resizable().interpolation(.high).scaledToFit()
+            } else {
+                Image(systemName: "doc").resizable().scaledToFit().foregroundStyle(.secondary)
+            }
+        }
+        .task(id: [path, fileName]) {
+            icon = nil
+            let loaded = await LibraryFileIcons.load(path: path, fileName: fileName)
+            guard !Task.isCancelled else { return }
+            icon = loaded
+        }
+    }
+}
+
+/// Icon Services may synchronously inspect a file or contact another process
+/// (notably for disk images). Keep that work out of SwiftUI's render pass.
+private enum LibraryFileIcons {
+    private static let queue = DispatchQueue(label: "app.toastpeek.library-icons", qos: .utility)
+    // Every cache access runs on queue; no mutable cache state escapes it.
+    nonisolated(unsafe) private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 256
+        return cache
+    }()
+
+    static func load(path: String, fileName: String) async -> NSImage {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                let ext = (fileName as NSString).pathExtension.lowercased()
+                let key = (path.isEmpty ? "type:\(ext)" : "file:\(path)") as NSString
+                if let cached = cache.object(forKey: key) {
+                    continuation.resume(returning: cached)
+                    return
+                }
+                let exists = !path.isEmpty && FileManager.default.fileExists(atPath: path)
+                let icon = exists ? NSWorkspace.shared.icon(forFile: path)
+                    : NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
+                cache.setObject(icon, forKey: key)
+                continuation.resume(returning: icon)
+            }
+        }
     }
 }
 
@@ -335,9 +374,10 @@ private struct ActiveDownloadRow: View {
 private struct DownloadRecordRow: View {
     let record: DownloadRecord
     @EnvironmentObject var store: BrowserStore
+    @State private var fileExists: Bool?
 
     var body: some View {
-        let exists = FileManager.default.fileExists(atPath: record.fullPath)
+        let exists = fileExists != false
         LibraryRow(title: record.fileName, subtitle: subtitle(exists: exists), dimmed: !exists,
                    action: { if exists { NSWorkspace.shared.open(record.fileURL) } }) {
             FileIcon(path: record.fullPath, fileName: record.fileName)
@@ -353,6 +393,15 @@ private struct DownloadRecordRow: View {
             }
             Divider()
             Button("Remove from List") { store.removeDownloadRecord(record) }
+        }
+        .task(id: record.fullPath) {
+            fileExists = nil
+            let path = record.fullPath
+            let exists = await Task.detached(priority: .utility) {
+                FileManager.default.fileExists(atPath: path)
+            }.value
+            guard !Task.isCancelled else { return }
+            fileExists = exists
         }
     }
 

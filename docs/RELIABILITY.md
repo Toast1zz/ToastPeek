@@ -1,6 +1,12 @@
-# Reliability notes for 1.0.3
+# Reliability notes for 1.0.4
 
 This release fixes browser lifecycle and data-handling problems without redesigning the interface. It remains an early-stage browser.
+
+## Changes in 1.0.4
+
+Opening Downloads no longer checks files or requests system file icons synchronously during SwiftUI rendering. Rows show a placeholder while icons load on a background queue, with a cache limited to 256 icons. File availability checks also run in the background. Cancelled row tasks discard their results.
+
+Local validation passed all 83 existing tests (36 core and 47 integration), plus strict arm64 and universal Release builds. No sample of the reported multi-second freeze was captured, so this change removes a confirmed blocking path without establishing the sole cause of that incident.
 
 Version 1.0.3 scopes favicon caching and requests to the owning profile and origin. See [the October 26 audit record](AUDIT_FOLLOWUP_2026-10-26.md) for validation and compatibility limits. Local verification passed 52 tests through `scripts/test.sh headless`, including real WebKit requests without showing windows. The full core, AppKit and WebKit suites run in CI.
 
