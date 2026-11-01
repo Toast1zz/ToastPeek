@@ -1,6 +1,6 @@
 # ToastPeek 1.0.7 release verification
 
-Version `1.0.7`, build `8`; source commit `b17a15fb4d54658ce7a5125368a6f67ef078c957`.
+Version `1.0.7`, build `8`; final source commit is `cc101b615eee9a6bac72c4563429012cc51311e3`.
 The historical `v1.0.5` and `v1.0.6` tags are superseded. No v1.0.6 GitHub release was published; v1.0.7 is authoritative.
 
 ## Scope
@@ -13,8 +13,8 @@ Legacy archived records without `archivedAt` retain deterministic `lastVisitedAt
 
 - Core: 39/39 passed; integration: 65/65 passed. Output: `/tmp/toastpeek-v107`.
 - Strict `scripts/package.sh all` passed with warnings-as-errors and localization validation.
-- Arm64 ZIP: `/tmp/toastpeek-v107-pack/Releases/1.0.7/ToastPeek-1.0.7-arm64.zip`; SHA-256 `58647140dece2d4e611b2e93893a134e4decdc89ec8c29faab5fd944e756b91e`.
-- Universal ZIP: `/tmp/toastpeek-v107-pack/Releases/1.0.7/ToastPeek-1.0.7-universal.zip`; SHA-256 `32b3a7597e34c3ad455031a6caa2622497c4fb8fdadfac3de2240752d68e7331`.
+- Arm64 ZIP: `/tmp/toastpeek-v107-final/Releases/1.0.7/ToastPeek-1.0.7-arm64.zip`; SHA-256 `173b8639441443b36122c372e58b23f66b91ad38642d1594b4434100a74581f4`.
+- Universal ZIP: `/tmp/toastpeek-v107-final/Releases/1.0.7/ToastPeek-1.0.7-universal.zip`; SHA-256 `9eaa846f9f9f235eaa1d799be8f86e78e002984d59f7e6148b91e540a1baee47`.
 - Both archives were checked for version/build metadata, architecture, localization, and deep strict ad-hoc signatures.
 
 ## Quit/persistence evidence
@@ -25,6 +25,6 @@ AppleScript probes returning user-cancelled `-128` are recorded as cancellation 
 
 ## CI/publication
 
-Final source CI run: 41345875305, https://github.com/Toast1zz/ToastPeek/actions/runs/41345875305. Its result is recorded only after completion; no green claim is made while it is in progress.
+- Final source CI: run `41347188874`, https://github.com/Toast1zz/ToastPeek/actions/runs/41347188874. Record its completed result before claiming green.
 
 Expected public assets are `ToastPeek-1.0.7-arm64.zip` and `ToastPeek-1.0.7-universal.zip` with the hashes above. The build is ad-hoc signed and not notarized.
