@@ -887,16 +887,17 @@ final class BrowserStore: ObservableObject {
             self.objectWillChange.send()
             completion(true)
         }
+        let webKitFinish: @Sendable () -> Void = { Task { @MainActor in finish() } }
         if let siteKey {
             dataStore.fetchDataRecords(ofTypes: types) { records in
                 let matching = records.filter {
                     let name = $0.displayName.lowercased()
                     return name == siteKey || name.hasSuffix("." + siteKey) || siteKey.hasSuffix("." + name)
                 }
-                dataStore.removeData(ofTypes: types, for: matching, completionHandler: finish)
+                dataStore.removeData(ofTypes: types, for: matching, completionHandler: webKitFinish)
             }
         } else {
-            dataStore.removeData(ofTypes: types, modifiedSince: .distantPast, completionHandler: finish)
+            dataStore.removeData(ofTypes: types, modifiedSince: .distantPast, completionHandler: webKitFinish)
         }
     }
 

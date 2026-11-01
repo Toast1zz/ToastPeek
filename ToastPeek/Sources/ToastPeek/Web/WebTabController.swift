@@ -1015,7 +1015,7 @@ final class WebTabController: NSObject, ObservableObject,
             completionHandler(response == .OK ? panel.urls : nil)
         }
     }
-#if compiler(>=6.3)
+#if compiler(>=6.4)
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
         let alert = NSAlert()
