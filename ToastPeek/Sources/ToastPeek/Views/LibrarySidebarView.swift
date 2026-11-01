@@ -518,16 +518,22 @@ private struct MediaTile: View {
         .task(id: record.fullPath) { image = await Self.thumbnail(record.fileURL) }
     }
 
-    /// Small decoded thumbnail, off the main thread.
+    /// Decode a bounded thumbnail off the main actor, then create NSImage on
+    /// the main actor so Swift 6 does not transfer AppKit objects across tasks.
     static func thumbnail(_ url: URL) async -> NSImage? {
-        await Task.detached(priority: .utility) { () -> NSImage? in
+        let data: Data? = await Task.detached(priority: .utility) { () -> Data? in
             guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceThumbnailMaxPixelSize: 360,
                   ] as CFDictionary) else { return nil }
-            return NSImage(cgImage: cg, size: .zero)
+            let output = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(dest, cg, nil)
+            guard CGImageDestinationFinalize(dest) else { return nil }
+            return output as Data
         }.value
+        return data.flatMap { NSImage(data: $0) }
     }
 }
 

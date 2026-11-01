@@ -394,7 +394,12 @@ final class WebKitRuntimeTests: XCTestCase {
         XCTAssertTrue(store.downloadManager.hasActiveDownloads(for: c.tabID))
         try await waitUntil { release != nil }
         store.downloadManager.resumeCompletionGate = nil
-        return (c, item.id, try XCTUnwrap(release))
+        let resumeOnce: () -> Void = {
+            let callback = release
+            release = nil
+            callback?()
+        }
+        return (c, item.id, resumeOnce)
     }
 
     func testCancelAllWaitsForLateResumeCancellationAndEscalatesDiscard() async throws {
