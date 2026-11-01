@@ -23,7 +23,7 @@ for scheme in "${schemes[@]}"; do
     -derivedDataPath "$OUT/DerivedData" CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}" "${test_args[@]}" > "$log" 2>&1
   code=$?
   set -e
-  rg "^[^[:space:]].*:[0-9]+:[0-9]+: (error|warning):|^Test Case .* failed|Executed [0-9]+ tests?|TEST (SUCCEEDED|FAILED)" "$log" | tail -40 || true
-  if [[ $code -eq 0 ]] && ! rg -q "Executed [1-9][0-9]* tests?" "$log"; then echo "No tests ran; see $log" >&2; exit 1; fi
+  grep -E "^[^[:space:]].*:[0-9]+:[0-9]+: (error|warning):|^Test Case .* failed|Executed [0-9]+ tests?|TEST (SUCCEEDED|FAILED)" "$log" | tail -40 || true
+  if [[ $code -eq 0 ]] && ! grep -Eq "Executed [1-9][0-9]* tests?" "$log"; then echo "No tests ran; see $log" >&2; exit 1; fi
   if [[ $code -ne 0 ]]; then echo "Tests failed; see $log" >&2; exit "$code"; fi
 done
