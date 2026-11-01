@@ -25,39 +25,12 @@ enum FuzzyMatch {
     }
 }
 
-/// Fetches search-engine suggestions for the Command Bar, debounced.
-@MainActor
-final class SearchSuggestions: ObservableObject {
-    @Published private(set) var items: [String] = []
-    private var task: Task<Void, Never>?
-
-    func update(query: String, engine: SearchEngine, enabled: Bool) {
-        task?.cancel()
-        let q = query.trimmingCharacters(in: .whitespaces)
-        guard enabled, !q.isEmpty, !URLResolver.looksLikeURL(q), let template = engine.suggestTemplate,
-              let url = URL(string: template.replacingOccurrences(of: "%@", with: URLResolver.encodeQueryValue(q))) else {
-            items = []
-            return
-        }
-        task = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            guard !Task.isCancelled else { return }
-            var request = URLRequest(url: url, timeoutInterval: 4)
-            request.httpShouldHandleCookies = false
-            let result = try? await URLSession.shared.data(for: request)
-            guard let (data, _) = result, !Task.isCancelled else { return }
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
-            guard let json, json.count > 1, let list = json[1] as? [String] else { return }
-            self?.items = Array(list.filter { $0.lowercased() != q.lowercased() }.prefix(4))
-        }
-    }
-}
-
 /// The Command Bar. Cmd+T opens it for a new tab; Cmd+L (or clicking the
 /// address) opens it on the current page's address. Open tabs, history,
 /// search suggestions and app commands share one ranked list.
 struct CommandBarView: View {
     @EnvironmentObject var store: BrowserStore
+    @StateObject private var shortcuts = ShortcutStore.shared
     @StateObject private var suggestions = SearchSuggestions()
     @State private var query = ""
     @State private var selectedIndex = 0
@@ -73,7 +46,7 @@ struct CommandBarView: View {
     @FocusState private var focused: Bool
     @Environment(\.colorScheme) private var scheme
 
-    private enum Icon { case favicon(FaviconKey?), symbol(String) }
+    private enum Icon { case favicon(URL?, UUID?), symbol(String) }
 
     private struct Hit: Identifiable {
         let id: String
@@ -101,12 +74,12 @@ struct CommandBarView: View {
             guard s >= 0 else { continue }
             let spaceName = t.kind == .favorite ? String(localized: "Favorite") : store.space(for: t).name
             tabHits.append((s + (t.kind == .today ? 0 : 6), Hit(
-                id: "tab-\(t.id)", icon: .favicon(store.faviconKey(for: t)), title: t.displayTitle,
+                id: "tab-\(t.id)", icon: .favicon(t.url, store.isReadOnly ? nil : store.profileSpace(for: t).dataStoreID), title: t.displayTitle,
                 subtitle: t.displayHost, hint: String(localized: "Switch to Tab · \(spaceName)")) { store.select(t); dismiss() }))
         }
         out += tabHits.sorted { $0.0 > $1.0 }.prefix(4).map(\.1)
 
-        for (i, s) in suggestions.items.enumerated() {
+        for (i, s) in suggestions.items(for: q).enumerated() {
             out.append(Hit(id: "sug-\(i)-\(s)", icon: .symbol("magnifyingglass"), title: s,
                            subtitle: "", hint: "") { run(s) })
         }
@@ -118,7 +91,7 @@ struct CommandBarView: View {
                         FuzzyMatch.score(query: q, candidate: h.urlString) ?? -1)
             guard s >= 0, !seen.contains(h.urlString) else { continue }
             seen.insert(h.urlString)
-            historyHits.append((s, Hit(id: "hist-\(h.id)", icon: .favicon(nil),
+            historyHits.append((s, Hit(id: "hist-\(h.id)", icon: .favicon(nil, nil),
                                        title: h.title.isEmpty ? h.urlString : h.title,
                                        subtitle: h.urlString, hint: "") { run(h.urlString) }))
         }
@@ -135,8 +108,7 @@ struct CommandBarView: View {
 
     private func primaryHit(for q: String) -> Hit {
         if URLResolver.looksLikeURL(q), let url = URLResolver.resolve(q, engine: store.searchEngine) {
-            let profileID = store.commandTargetTab.map { store.profileSpace(for: $0).dataStoreID } ?? store.currentSpace.dataStoreID
-            return Hit(id: "primary", icon: .favicon(FaviconKey(url: url, profileID: profileID)), title: url.absoluteString
+            return Hit(id: "primary", icon: .favicon(nil, nil), title: url.absoluteString
                 .replacingOccurrences(of: "https://", with: ""),
                        subtitle: "", hint: mode == .editCurrent ? String(localized: "Open") : String(localized: "Open in New Tab")) { run(q) }
         }
@@ -149,7 +121,7 @@ struct CommandBarView: View {
             .sorted { $0.lastVisitedAt > $1.lastVisitedAt }
             .prefix(7)
             .map { t in
-                Hit(id: "recent-\(t.id)", icon: .favicon(store.faviconKey(for: t)), title: t.displayTitle,
+                Hit(id: "recent-\(t.id)", icon: .favicon(t.url, store.isReadOnly ? nil : store.profileSpace(for: t).dataStoreID), title: t.displayTitle,
                     subtitle: t.displayHost,
                     hint: t.kind == .favorite ? String(localized: "Favorite") : store.space(for: t).name) { store.select(t); dismiss() }
             }
@@ -161,17 +133,17 @@ struct CommandBarView: View {
     private var commands: [Command] {
         var list: [Command] = [
             Command(title: String(localized: "New Space"), symbol: "square.stack", action: { store.spaceEditor = SpaceEditorRequest(spaceID: nil) }),
-            Command(title: String(localized: "Toggle Sidebar"), symbol: "sidebar.left", shortcut: "⌘S") { store.isSidebarVisible.toggle() },
-            Command(title: String(localized: "Split View"), symbol: "rectangle.split.2x1", shortcut: "⌃⇧=") { store.toggleSplit() },
-            Command(title: String(localized: "Copy URL"), symbol: "link", shortcut: "⇧⌘C") { store.copyCurrentURL() },
-            Command(title: String(localized: "History"), symbol: "clock", shortcut: "⌘Y") { store.openHistoryPage() },
+            Command(title: String(localized: "Toggle Sidebar"), symbol: "sidebar.left", shortcut: ShortcutStore.display(action: "menuToggleSidebar")) { store.isSidebarVisible.toggle() },
+            Command(title: String(localized: "Split View"), symbol: "rectangle.split.2x1", shortcut: ShortcutStore.display(action: "menuToggleSplit")) { store.toggleSplit() },
+            Command(title: String(localized: "Copy URL"), symbol: "link", shortcut: ShortcutStore.display(action: "menuCopyURL")) { store.copyCurrentURL() },
+            Command(title: String(localized: "History"), symbol: "clock", shortcut: ShortcutStore.display(action: "menuHistory")) { store.openHistoryPage() },
             Command(title: String(localized: "Library"), symbol: "archivebox") { store.openLibrary() },
             Command(title: String(localized: "Archived Tabs"), symbol: "archivebox") { store.openLibrary(.archived) },
-            Command(title: String(localized: "Downloads"), symbol: "arrow.down.circle", shortcut: "⇧⌘J") { store.openLibrary(.downloads) },
+            Command(title: String(localized: "Downloads"), symbol: "arrow.down.circle", shortcut: ShortcutStore.display(action: "menuDownloads")) { store.openLibrary(.downloads) },
             Command(title: String(localized: "Clear Today Tabs"), symbol: "arrow.down.to.line") { store.clearToday() },
-            Command(title: String(localized: "Developer Tools"), symbol: "hammer", shortcut: "⌥⌘I") { store.showDevTools() },
+            Command(title: String(localized: "Developer Tools"), symbol: "hammer", shortcut: ShortcutStore.display(action: "menuDevTools")) { store.showDevTools() },
             Command(title: String(localized: "Extensions"), symbol: "puzzlepiece.extension") { store.onOpenSettings?(.extensions) },
-            Command(title: String(localized: "Reload Page"), symbol: "arrow.clockwise", shortcut: "⌘R") { store.reload() },
+            Command(title: String(localized: "Reload Page"), symbol: "arrow.clockwise", shortcut: ShortcutStore.display(action: "menuReload")) { store.reload() },
         ]
         for space in store.spaces where space.id != store.currentSpaceID {
             list.append(Command(title: String(localized: "Go to \(space.name)"), symbol: "square.on.square") { store.switchSpace(to: space.id) })
@@ -213,10 +185,12 @@ struct CommandBarView: View {
                     ScrollView {
                         VStack(spacing: 2) {
                             ForEach(Array(currentHits.enumerated()), id: \.element.id) { index, hit in
-                                row(hit, selected: index == selectedIndex)
+                                Button(action: hit.action) {
+                                    row(hit, selected: index == selectedIndex)
+                                }
+                                    .buttonStyle(.plain)
                                     .id(index)
-                                    .onTapGesture { hit.action() }
-                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityAddTraits(index == selectedIndex ? [.isSelected] : [])
                                     .onHover { inside in
                                         guard inside, NSEvent.mouseLocation != hoverAnchor else { return }
                                         selectedIndex = index
@@ -231,7 +205,7 @@ struct CommandBarView: View {
                 }
             }
         }
-        .frame(width: 660)
+        .frame(maxWidth: 660)
         .background(Color(nsColor: .windowBackgroundColor).opacity(scheme == .dark ? 0.82 : 0.86),
                     in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -248,20 +222,33 @@ struct CommandBarView: View {
         .onChange(of: query) {
             selectedIndex = 0
             hoverAnchor = NSEvent.mouseLocation
-            refreshHits()
             suggestions.update(query: query, engine: store.searchEngine, enabled: store.searchSuggestionsEnabled)
+            refreshHits()
         }
         .onChange(of: suggestions.items) { refreshHits() }
+        .onChange(of: store.searchSuggestionsEnabled) { updateSuggestions() }
+        .onChange(of: store.searchEngine) { updateSuggestions() }
+        .onChange(of: shortcuts.overrides) { refreshHits() }
+        .onDisappear { suggestions.cancel() }
+    }
+
+    private var selectionForeground: Color {
+        ThemeContrast.usesDarkForeground(hex: store.currentSpace.colorHex) ? .black : .white
+    }
+
+    private func updateSuggestions() {
+        suggestions.update(query: query, engine: store.searchEngine, enabled: store.searchSuggestionsEnabled)
+        refreshHits()
     }
 
     private func row(_ hit: Hit, selected: Bool) -> some View {
         HStack(spacing: 10) {
             Group {
                 switch hit.icon {
-                case .favicon(let key): FaviconView(key: key, size: 16)
+                case .favicon(let url, let profileID): FaviconView(url: url, profileID: profileID, size: 16)
                 case .symbol(let name):
                     Image(systemName: name).font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(selected ? Color.white : Color.secondary)
+                        .foregroundStyle(selected ? selectionForeground : Color.secondary)
                 }
             }
             .frame(width: 20, height: 20)
@@ -271,21 +258,25 @@ struct CommandBarView: View {
             if !hit.subtitle.isEmpty && hit.subtitle != hit.title {
                 Text("— \(hit.subtitle)")
                     .font(.system(size: 12.5))
-                    .foregroundStyle(selected ? Color.white.opacity(0.75) : Color.secondary)
+                    .foregroundStyle(selected ? selectionForeground : Color.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
+            if selected {
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold))
+                    .accessibilityHidden(true)
+            }
             if !hit.hint.isEmpty {
                 Text(hit.hint)
                     .font(.system(size: 11.5))
-                    .foregroundStyle(selected ? Color.white.opacity(0.8) : Color.secondary.opacity(0.8))
+                    .foregroundStyle(selected ? selectionForeground : Color.secondary.opacity(0.8))
                     .lineLimit(1)
             }
         }
-        .foregroundStyle(selected ? Color.white : Color.primary)
+        .foregroundStyle(selected ? selectionForeground : Color.primary)
         .padding(.horizontal, 10)
         .frame(height: 36)
-        .background(selected ? store.currentSpace.color.opacity(0.92) : .clear,
+        .background(selected ? store.currentSpace.color : .clear,
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contentShape(Rectangle())
     }

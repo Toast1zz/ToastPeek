@@ -9,6 +9,7 @@ import WebKit
 /// window, so two windows can show different pages.
 @MainActor
 final class WindowTabState: ObservableObject {
+    let pageState = BrowserPageState()
     @Published var spaceID: UUID?
     func space(in store: BrowserStore) -> BrowserSpace {
         store.spaces.first { $0.id == spaceID } ?? store.currentSpace
@@ -124,10 +125,27 @@ final class BrowserStore: ObservableObject {
     /// Pinned tab or Favorite waiting for delete confirmation.
     @Published var pendingDeleteTab: BrowserTab?
 
-    @Published var isFindBarVisible: Bool = false
-    @Published var findText: String = ""
-    @Published var findMatchCount: Int = 0
-    @Published var findActiveOrdinal: Int = 0
+    private let fallbackPageState = BrowserPageState()
+    private let keyWindowProvider: @MainActor () -> NSWindow?
+    private(set) var peekPageStates: [UUID: BrowserPageState] = [:]
+    var activePeekPageState: BrowserPageState? {
+        guard let window = keyWindowProvider() else { return nil }
+        return peekPageStates.values.first { $0.window === window }
+    }
+    var commandPageState: BrowserPageState {
+        activePeekPageState ?? activeWindowState?.pageState ?? fallbackPageState
+    }
+    // Compatibility for the DEBUG test driver; views observe their own page state.
+    var isFindBarVisible: Bool {
+        get { commandPageState.isFindBarVisible }
+        set { commandPageState.isFindBarVisible = newValue }
+    }
+    var findText: String {
+        get { commandPageState.findText }
+        set { commandPageState.findText = newValue }
+    }
+    var findMatchCount: Int { commandPageState.findMatchCount }
+    var findActiveOrdinal: Int { commandPageState.findActiveOrdinal }
 
     /// This session's downloads (in progress and finished).
     @Published var downloads: [DownloadItemState] = []
@@ -171,9 +189,8 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var persistenceError: String?
     @Published private(set) var isClearingData = false
     var isReadOnly: Bool { !stateWritesAllowed }
-    var canLoadWebContent: Bool { !isClearingData && !pendingCleanup }
+    var canLoadWebContent: Bool { !isReadOnly && !isClearingData && !pendingCleanup }
     lazy var downloadManager = DownloadManager(store: self)
-    let faviconStore: FaviconStore
     var dataFileURL: URL { stateFile.primary }
     private var saveWorkItem: DispatchWorkItem?
     private var lastBackupAt = Date.distantPast
@@ -193,8 +210,9 @@ final class BrowserStore: ObservableObject {
         var writesAllowed: Bool
     }
 
-    init(stateURL: URL = AppPaths.support.appendingPathComponent("state.json")) {
-        faviconStore = FaviconStore(directory: stateURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
+    init(stateURL: URL = AppPaths.support.appendingPathComponent("state.json"),
+         keyWindowProvider: @escaping @MainActor () -> NSWindow? = { NSApp.keyWindow }) {
+        self.keyWindowProvider = keyWindowProvider
         stateFile = StateFile(primary: stateURL)
         writeLease = StateWriteLease(url: stateURL)
         stateWritesAllowed = writeLease.acquired
@@ -230,7 +248,6 @@ final class BrowserStore: ObservableObject {
         pendingCleanup = pendingCleanup || FileManager.default.fileExists(atPath: stateFile.cleanupMarker.path)
         if pendingCleanup { resumePendingCleanup() }
         retryPendingDataStoreDeletions()
-        prefetchIcons()
         maintenanceTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.retryPendingDataStoreDeletions()
@@ -238,11 +255,6 @@ final class BrowserStore: ObservableObject {
                 self?.unloadIdleTabs()
             }
         }
-    }
-
-    /// Icons for Favorites and Pinned tabs that never loaded in a browser.
-    func prefetchIcons() {
-        // Importing bookmarks does not authorize background requests to those sites.
     }
 
     var resolvedDownloadsFolder: String {
@@ -323,7 +335,13 @@ final class BrowserStore: ObservableObject {
         folders.filter { $0.spaceID == spaceID }
     }
     var archived: [BrowserTab] {
-        cached("archived") { tabs.filter(\.isArchived).sorted { $0.lastVisitedAt > $1.lastVisitedAt } }
+        cached("archived") {
+            tabs.filter(\.isArchived).sorted {
+                let lhs = $0.archivedAt ?? $0.lastVisitedAt
+                let rhs = $1.archivedAt ?? $1.lastVisitedAt
+                return lhs == rhs ? $0.id.uuidString < $1.id.uuidString : lhs > rhs
+            }
+        }
     }
     var selectedTab: BrowserTab? { tabs.first(where: { $0.id == selectedTabID }) }
     func tab(_ id: UUID?) -> BrowserTab? {
@@ -384,7 +402,15 @@ final class BrowserStore: ObservableObject {
     private func repairWindowStates(afterRemoving tabID: UUID, spaceID: UUID, neighbour: UUID?) {
         for ws in windowStates {
             ws.splitTabIDs.removeAll { $0 == tabID }
-            if ws.selectedTabID == tabID { ws.selectedTabID = neighbour }
+            if ws.selectedTabID == tabID {
+                let shownElsewhere = Set(windowStates.filter { $0 !== ws }.flatMap(\.paneTabIDs))
+                let candidates = [neighbour].compactMap { $0 } + visibleOrder(in: spaceID).map(\.id)
+                ws.selectedTabID = candidates.first { id in
+                    id != tabID && !shownElsewhere.contains(id) && !ws.splitTabIDs.contains(id)
+                        && tabs.contains { $0.id == id && !$0.isArchived }
+                } ?? ws.splitTabIDs.first
+                if let selected = ws.selectedTabID { ws.splitTabIDs.removeAll { $0 == selected } }
+            }
             if ws.focusedPaneTabID == tabID { ws.focusedPaneTabID = ws.selectedTabID }
             if ws.fullscreenTabID == tabID { ws.fullscreenTabID = nil }
         }
@@ -834,6 +860,46 @@ final class BrowserStore: ObservableObject {
         replaceBackupOnNextSave = true
         scheduleSave()
     }
+    /// Scoped clearing pauses web content until WebKit has finished removing data.
+    func clearSiteData(for tab: BrowserTab, completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        let key = Self.siteKey(tab.host)
+        guard !key.isEmpty else { completion(false); return }
+        clearProfileData(profileSpace(for: tab).dataStoreID, siteKey: key, completion: completion)
+    }
+
+    func clearSpaceData(_ space: BrowserSpace) {
+        guard spaces.contains(where: { $0.id == space.id && $0.dataStoreID == space.dataStoreID }) else { return }
+        clearProfileData(space.dataStoreID, siteKey: nil, completion: { _ in })
+    }
+
+    private func clearProfileData(_ profileID: UUID, siteKey: String?, completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        guard stateWritesAllowed, !isClearingData, !pendingCleanup,
+              spaces.contains(where: { $0.dataStoreID == profileID }),
+              !pendingDataStoreDeletions.contains(profileID) else { completion(false); return }
+        isClearingData = true
+        for (id, controller) in Array(controllers) where controller.dataStoreID == profileID { unload(id) }
+        FaviconStore.shared.removeProfile(profileID)
+        let dataStore = WKWebsiteDataStore(forIdentifier: profileID)
+        let types = WKWebsiteDataStore.allWebsiteDataTypes()
+        let finish: @MainActor @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            self.isClearingData = false
+            self.objectWillChange.send()
+            completion(true)
+        }
+        if let siteKey {
+            dataStore.fetchDataRecords(ofTypes: types) { records in
+                let matching = records.filter {
+                    let name = $0.displayName.lowercased()
+                    return name == siteKey || name.hasSuffix("." + siteKey) || siteKey.hasSuffix("." + name)
+                }
+                dataStore.removeData(ofTypes: types, for: matching, completionHandler: finish)
+            }
+        } else {
+            dataStore.removeData(ofTypes: types, modifiedSince: .distantPast, completionHandler: finish)
+        }
+    }
+
     /// Persist the intent before deleting any copy. A crash resumes cleanup
     /// before the next web view can load and recreate site data.
     func clearBrowsingData() {
@@ -853,8 +919,7 @@ final class BrowserStore: ObservableObject {
         sitePermissions = []
         certExceptions = []
         tabs.removeAll { $0.isArchived }
-        downloadRecords = []
-        downloads = []
+        // Download records remain visible until cancellation and file cleanup finish.
         viewSourceTexts = [:]
         viewSourceFailed = []
         viewSourceRequested = []
@@ -862,7 +927,7 @@ final class BrowserStore: ObservableObject {
         let group = DispatchGroup()
         var cleanupError: String?
         group.enter()
-        faviconStore.removeAll { result in
+        FaviconStore.shared.removeAll { result in
             if case .failure(let error) = result { cleanupError = error.localizedDescription }
             group.leave()
         }
@@ -883,6 +948,8 @@ final class BrowserStore: ObservableObject {
                     return
                 }
                 self.pendingCleanup = false
+                self.downloads = []
+                self.downloadRecords = []
                 self.replaceBackupOnNextSave = true
                 if self.flush() {
                     do {
@@ -895,8 +962,6 @@ final class BrowserStore: ObservableObject {
                         self.toast = self.persistenceError
                     }
                 } else { self.pendingCleanup = true }
-                self.downloads = []
-                self.downloadRecords = []
                 self.isClearingData = false
                 self.objectWillChange.send()
             }
@@ -1082,7 +1147,7 @@ final class BrowserStore: ObservableObject {
     }
 
     var activeController: WebTabController? {
-        if let window = NSApp.keyWindow,
+        if let window = keyWindowProvider(),
            let peek = controllers.values.first(where: { peekTabs[$0.tabID] != nil && $0.container.window === window }) { return peek }
         if let ws = activeWindowState {
             if let f = ws.focusedPaneTabID, ws.paneTabIDs.contains(f), let c = controllers[f] { return c }
@@ -1170,32 +1235,69 @@ final class BrowserStore: ObservableObject {
 
     // MARK: Find in page
 
+    @discardableResult
+    func focusPeekAddress() -> Bool {
+        guard let state = activePeekPageState else { return false }
+        state.requestAddressFocus()
+        return true
+    }
+
     func showFindBar() {
-        isFindBarVisible = true
-        if !findText.isEmpty { performFind() }
+        let state = commandPageState
+        state.requestFindFocus()
+        performFind(in: state, tabID: activeController?.tabID ?? focusedPaneTabID)
     }
     func hideFindBar() {
-        isFindBarVisible = false
-        activeController?.stopFinding()
-        findMatchCount = 0
-        findActiveOrdinal = 0
+        hideFindBar(in: commandPageState)
+    }
+    func hideFindBar(in state: BrowserPageState) {
+        state.isFindBarVisible = false
+        controller(forTabID: state.findTabID)?.stopFinding()
+        state.findTabID = nil
+        state.resetFindResult()
     }
     func performFind() {
-        guard !findText.isEmpty else {
-            activeController?.stopFinding()
-            findMatchCount = 0
-            findActiveOrdinal = 0
+        performFind(in: commandPageState, tabID: activeController?.tabID ?? focusedPaneTabID)
+    }
+    func performFind(in state: BrowserPageState, tabID: UUID?) {
+        if state.findTabID != tabID {
+            controller(forTabID: state.findTabID)?.stopFinding()
+        }
+        state.findTabID = tabID
+        state.resetFindResult()
+        guard !state.findText.isEmpty else {
+            controller(forTabID: tabID)?.stopFinding()
             return
         }
-        activeController?.find(findText, forward: true, findNext: false)
+        controller(forTabID: tabID)?.find(state.findText, forward: true)
     }
     func findNext(forward: Bool) {
-        guard !findText.isEmpty else { return }
-        activeController?.find(findText, forward: forward, findNext: true)
+        findNext(in: commandPageState, forward: forward)
     }
-    func updateFindResult(count: Int, activeOrdinal: Int) {
-        findMatchCount = count
-        findActiveOrdinal = activeOrdinal
+    func findNext(in state: BrowserPageState, forward: Bool) {
+        guard !state.findText.isEmpty else { return }
+        controller(forTabID: state.findTabID)?.find(state.findText, forward: forward)
+    }
+    func updateFindResult(tabID: UUID, count: Int, activeOrdinal: Int) {
+        let states = windowStates.map(\.pageState) + Array(peekPageStates.values) + [fallbackPageState]
+        for state in states where state.isFindBarVisible && state.findTabID == tabID {
+            state.findMatchCount = count
+            state.findActiveOrdinal = activeOrdinal
+        }
+    }
+
+    /// Only an explicit button choice may alter remembered media permissions.
+    /// Closing a sheet for navigation, window teardown or app exit is one-time deny.
+    func resolveMediaPermission(origin: String, profileID: UUID, requested: UInt32,
+                                response: NSApplication.ModalResponse, remember: Bool) -> Bool {
+        guard response == .alertFirstButtonReturn || response == .alertSecondButtonReturn else { return false }
+        let allow = response == .alertFirstButtonReturn
+        if remember && !isReadOnly {
+            sitePermissions.remember(origin: origin, profileID: profileID, kind: .media,
+                                     requested: requested, allow: allow)
+            scheduleSave()
+        }
+        return allow
     }
 
     // MARK: Downloads
@@ -1273,8 +1375,10 @@ final class BrowserStore: ObservableObject {
     }
     /// Deletes a Space with its tabs and folders. The last Space stays.
     func deleteSpace(_ id: UUID) {
-        guard spaces.count > 1, let i = spaces.firstIndex(where: { $0.id == id }) else { return }
+        guard stateWritesAllowed, !isClearingData, !pendingCleanup,
+              spaces.count > 1, let i = spaces.firstIndex(where: { $0.id == id }) else { return }
         let deletedProfile = spaces[i].dataStoreID
+        FaviconStore.shared.removeProfile(deletedProfile)
         let fallbackProfile = spaces.first { $0.id != id }!.dataStoreID
         let removedTabIDs = tabs.filter { $0.spaceID == id }.map(\.id)
         for t in tabs where t.spaceID == id || t.profileID == deletedProfile { unload(t.id) }
@@ -1313,35 +1417,22 @@ final class BrowserStore: ObservableObject {
                 WKWebsiteDataStore.remove(forIdentifier: id) { [weak self] error in
                     BrowserDiagnostics.record(["event": "profile-delete-complete", "profileID": id.uuidString,
                                                "errorCode": (error as NSError?)?.code ?? 0])
-                    let errorMessage = error?.localizedDescription
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        if let errorMessage {
-                            self.deletingDataStores.remove(id)
-                            self.toast = errorMessage
-                            // WebKit may still be releasing a just-closed view.
-                            // Retry a bounded burst, keeping the durable intent
-                            // for maintenance/next launch if removal still fails.
-                            if self.dataStoreDeletionAttempts[id, default: 0] <= 3 {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                                    self?.retryPendingDataStoreDeletions()
-                                }
-                            }
-                        } else {
-                            self.faviconStore.remove(profileID: id) { [weak self] result in
-                                guard let self else { return }
-                                self.deletingDataStores.remove(id)
-                                switch result {
-                                case .success:
-                                    self.pendingDataStoreDeletions.remove(id)
-                                    self.dataStoreDeletionAttempts.removeValue(forKey: id)
-                                    self.scheduleSave()
-                                case .failure(let error):
-                                    // Keep the durable intent so a later launch retries.
-                                    self.toast = error.localizedDescription
-                                }
+                    guard let self else { return }
+                    self.deletingDataStores.remove(id)
+                    if let error {
+                        self.toast = error.localizedDescription
+                        // WebKit may still be releasing a just-closed view.
+                        // Retry a bounded burst, keeping the durable intent
+                        // for maintenance/next launch if removal still fails.
+                        if self.dataStoreDeletionAttempts[id, default: 0] <= 3 {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                                self?.retryPendingDataStoreDeletions()
                             }
                         }
+                    } else {
+                        self.pendingDataStoreDeletions.remove(id)
+                        self.dataStoreDeletionAttempts.removeValue(forKey: id)
+                        self.scheduleSave()
                     }
                 }
             }
@@ -1479,10 +1570,12 @@ final class BrowserStore: ObservableObject {
                 changed = true
             }
         }
-        // The Archive keeps 30 days.
-        let purge = Date().addingTimeInterval(-30 * 86_400)
+        // Only archives with a recorded close time can be expired safely.
+        // Legacy records without archivedAt are retained until restored or
+        // explicitly deleted because their age cannot be established.
         let before = tabs.count
-        tabs.removeAll { $0.isArchived && ($0.archivedAt ?? Date()) < purge }
+        let purge = Date().addingTimeInterval(-30 * 86_400)
+        tabs.removeAll { $0.isArchived && $0.archivedAt.map { $0 < purge } == true }
         if changed || tabs.count != before { scheduleSave() }
     }
 
@@ -1644,9 +1737,6 @@ final class BrowserStore: ObservableObject {
             if let id = UUID(uuidString: k) { lastSelectedBySpace[id] = v }
         }
         // Older state never recorded pin addresses.
-        for i in tabs.indices where tabs[i].kind != .today && tabs[i].pinnedURLString == nil {
-            tabs[i].pinnedURLString = tabs[i].urlString
-        }
         // View Source tabs hold no persisted text; they would only show an error.
         // Tabs of the removed Easels/Notes pages have nothing left to show.
         tabs.removeAll { $0.viewSourceFor != nil || $0.urlString.hasPrefix("toastpeek://") }
@@ -1702,14 +1792,16 @@ struct SpaceEditorRequest: Identifiable, Equatable {
 // MARK: - Peek windows
 
 extension BrowserStore {
-    func registerPeekTab(_ tab: BrowserTab) {
+    func registerPeekTab(_ tab: BrowserTab, pageState: BrowserPageState? = nil) {
         var fixed = tab
         fixed.profileID = tab.profileID ?? currentSpace.dataStoreID
         fixed.spaceID = tab.spaceID ?? currentSpaceID
         peekTabs[tab.id] = fixed
+        if let pageState { peekPageStates[tab.id] = pageState }
     }
 
     func discardPeekTab(_ id: UUID) {
+        if let state = peekPageStates.removeValue(forKey: id) { hideFindBar(in: state) }
         peekTabs.removeValue(forKey: id)
         unload(id)
     }
@@ -1721,6 +1813,7 @@ extension BrowserStore {
 
     /// Moves a Peek page into a Space as a Today tab, keeping its live browser.
     func adoptPeekTab(_ tab: BrowserTab, intoSpace spaceID: UUID) {
+        if let state = peekPageStates.removeValue(forKey: tab.id) { hideFindBar(in: state) }
         var t = peekTabs.removeValue(forKey: tab.id) ?? tab
         if let live = controller(forTabID: tab.id) { t.urlString = live.currentURLString }
         if spaceID != currentSpaceID { switchSpace(to: spaceID) }

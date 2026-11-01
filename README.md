@@ -1,87 +1,39 @@
 # ToastPeek
 
-> [!WARNING]
-> ToastPeek is at an early stage. Expect bugs, crashes and breaking changes between versions, and keep a backup of anything important. Bug reports and pull requests are welcome.
+macOS 浏览器：SwiftUI + AppKit 界面，WebKit 引擎（系统媒体栈，
+H.264 / AAC / HEVC 走系统解码，无需自编译编解码器）。
 
-ToastPeek is a macOS web browser with a vertical tab sidebar and Spaces. The interface is SwiftUI and AppKit; pages are rendered by the system WebKit engine (`WKWebView`).
+- **侧边栏竖标签**：Favorites（全局）、Pinned + 文件夹、Today（12 小时后自动归档，可调）、Spaces（各自独立的数据存储：Cookie/登录互相隔离）
+- **Command Bar**：⌘T 新标签、⌘L 编辑当前地址；跨 Space 搜标签/历史/命令，搜索建议
+- **分屏**（⌃⇧=，最多 4 栏，可拖分隔条）、**Peek**（外部链接/Shift 点链接的小窗，可移入 Space）
+- **Boosts**（按网站注入 CSS/JS；CSS 编辑即时生效，JS 在后续导航时生效）、内建扩展（Content Blocker 内容拦截、Dark Mode 暗色注入）、PDF 查看、资料库（下载、媒体、已归档标签）、查找、缩放提示
+- 标签行：favicon、加载转圈、播放中喇叭（点一下静音）、悬停关闭；固定标签关闭=卸载并回到固定页。图标只从页面已作为图片加载的同源声明图标安全提取，不额外请求；仅声明 link 图标等无法提取的情况显示占位图，历史和 Boost 等无 profile 上下文的视图也显示占位图。图标缓存仅保留在会话中，旧版磁盘图标不再读取，清除全部浏览数据时删除。
+- 查找使用 WebKit 原生匹配；WebKit 不提供可靠总数，因此命中时显示“找到匹配”而不显示数量，仍可前后导航。
+- 深/浅色双套主题，主题色随 Space
 
-## Features
-
-- **Sidebar tabs.** Favorites are shared across Spaces. Each Space has pinned tabs (with folders) and a Today section. Today tabs that you have not visited for 12 hours move to an archive (the interval is configurable). Archived tabs stay in the Library for 30 days.
-- **Spaces.** Each Space has its own name, icon, color and website data store, so cookies and logins in one Space are not visible in another.
-- **Command bar.** Press ⌘T to open a tab or ⌘L to edit the current address. The bar searches open tabs, history and commands across all Spaces.
-- **Split view.** Show up to four tabs side by side in one window, with draggable dividers.
-- **Peek.** Links from other apps, and Shift-clicked links, can open in a small floating window. You can move the page into a Space or close it. An optional global shortcut (⌥⌘N) opens Peek from any app.
-- **Boosts and built-in tools.** Boosts add your own CSS or JavaScript to a site and apply as you edit. Built-in options include a content blocker (Safari content-blocker rules for third-party ad and tracker hosts) and a dark-mode style for websites.
-
-ToastPeek also includes a PDF viewer, a Library (downloads, media, archived tabs), find in page, history import from Safari, Chrome, Firefox and other Chromium-based browsers, rebindable shortcuts, light and dark appearance, and English and Simplified Chinese localizations.
-
-## Requirements
-
-- macOS 14.0 or later.
-- A Mac with Apple silicon or an Intel processor. Release builds are universal (arm64 + x86_64). The Intel code has been checked only under Rosetta on an Apple silicon Mac, not on an Intel Mac.
-
-## Install
-
-1. Download `ToastPeek-<version>-arm64.zip` for Apple silicon, or `ToastPeek-<version>-universal.zip` for Apple silicon and Intel, from the [latest release](../../releases/latest), and unzip it.
-2. Move `ToastPeek.app` to `/Applications`.
-3. The app is ad-hoc signed and not notarized, so Gatekeeper blocks the first launch. On macOS 14, right-click the app and choose **Open**. On macOS 15 and later, try to open it once, then click **Open Anyway** in System Settings > Privacy & Security. Alternatively, run:
-
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/ToastPeek.app
-   ```
-
-Data is stored in `~/Library/Application Support/ToastPeek`, and logs in `~/Library/Logs/ToastPeek`.
-
-Quit all older copies before upgrading. Version 1.0.2 prevents two new instances from saving to the same state file, but older builds do not honor that lock. Keep a backup before opening your data in a new version; downgrading can discard newer state fields.
-
-## Why WebKit instead of CEF/Chromium
-
-ToastPeek is a personal, free, open-source project. A browser that embeds CEF or another Chromium-based engine must rebuild and ship a large Chromium build on a regular schedule to keep up with security fixes. The official CEF builds also leave out proprietary codecs such as H.264 and AAC, and adding them means compiling Chromium from source, which takes hours each time. The project does not have time for that.
-
-WebKit ships with macOS. The system provides engine updates, security fixes and media decoding, including H.264, AAC and HEVC.
-
-The trade-off is that Chrome extensions do not work in ToastPeek, and the app does not load Safari Web Extensions either. The only extension-like features are the two built-in options described above (content blocker and website dark mode) and Boosts.
-
-## Known limitations
-
-- No support for Chrome or Safari Web Extensions (see above).
-- No Widevine DRM, so services that require Widevine do not play.
-- No picture-in-picture. macOS `WKWebView` has no public API for it.
-- No password manager and no sync.
-- Rendering and media support follow the installed macOS version of WebKit.
-- Release builds are ad-hoc signed and not notarized.
-- The Intel (x86_64) code has not been tested on an Intel Mac.
-
-Version 1.0.3 isolates favicon caches by profile and origin, keeps icon requests within the page's cookie and security context, and reduces cached image dimensions. The page-hosting fixes from 1.0.2 remain; an intermittent blank GitHub page seen in an older, signed-in session has not been conclusively diagnosed. See [reliability notes](docs/RELIABILITY.md) for the fixes, test coverage and remaining limits.
-
-## Build from source
-
-Requirements: Xcode (developed with Xcode 27) and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
+## 构建
 
 ```bash
-git clone https://github.com/Toast1zz/ToastPeek.git
-cd ToastPeek
-scripts/build.sh release     # universal Release build
-scripts/test.sh              # core and real AppKit/WebKit tests (shows test windows)
-scripts/test.sh headless     # core, favicon and import tests without test windows
-scripts/package.sh           # arm64 and universal public Release archives
+scripts/build.sh            # Debug 构建（签名：Apple Development）
+scripts/build.sh install    # Release 构建并装到 /Applications（会先正常退出正在运行的实例）
+scripts/test.sh             # 核心逻辑 + 真实 AppKit/WebKit 集成测试
 ```
 
-`scripts/build.sh` generates `ToastPeek/ToastPeek.xcodeproj` from `ToastPeek/project.yml` and builds into `~/Developer/Builds/ToastPeek`. To use a different folder, set `TOASTPEEK_BUILD_DIR`. The app is written to `DerivedData/Build/Products/<Config>/ToastPeek.app` under that folder. `scripts/build.sh` with no argument makes an arm64-only Debug build. `scripts/build.sh release` makes a universal Release build. `scripts/build.sh install` also copies the Release build to `/Applications`, quits the installed copy first, and preserves the previous app bundle. Quit any other copies using the same data before installing.
+先安装 Xcode 和 XcodeGen；将 `ToastPeek/config/Signing.local.xcconfig.example` 复制为同目录的 `Signing.local.xcconfig`，填写自己的固定签名身份。该本机文件不会进入版本控制。测试默认使用 ad-hoc 签名。
 
-Debug uses `app.toastpeek.mac.debug` and stores data in `~/Library/Application Support/ToastPeek-Development`; `TOASTPEEK_SUPPORT_DIR` can point it at a temporary directory. Release uses the normal data directory. Tests use temporary state files and website data stores.
+Release 构建包含 arm64 和 x86_64；Debug 构建使用主机架构，使用独立 bundle ID。产物与缓存在 `~/Developer/Builds/ToastPeek`。Release 数据在 `~/Library/Application Support/ToastPeek`，日志在 `~/Library/Logs/ToastPeek`；Debug 数据和日志在 `~/Library/Application Support/ToastPeek-Development`。Debug 可用 `TOASTPEEK_SUPPORT_DIR` 指定隔离目录。构建包含 Intel 架构不代表已经在 Intel 硬件验收。
 
-`scripts/package.sh` explicitly uses ad-hoc signing and complete Swift concurrency checks. Its archives are written to `Releases/<version>` under the build folder. Pass `arm64` or `universal` to build only one variant. This packaging path does not install the app.
+安装脚本只退出安装路径对应的进程，验证暂存包并在失败时回滚；旧包备份保存在构建目录的 `InstallBackups` 私有目录，不留在 `/Applications`。`TOASTPEEK_BUILD_DIR` 和 `TOASTPEEK_INSTALL_DIR` 可分别覆盖构建目录和安装目录。安装前应正常退出其他使用正式数据的旧版本副本；旧版本不遵守新版本的写入锁。
 
-Builds are ad-hoc signed by default. To sign with your own Apple Development certificate, copy `ToastPeek/config/Local.xcconfig.example` to `ToastPeek/config/Local.xcconfig` and fill in your identity and team ID. Git ignores that file. A stable identity keeps keychain items trusted across rebuilds.
+退出会先保存状态，并等待下载取消及正在进行的文件提交完成；普通 SIGTERM、Dock Quit 和退出 Apple Event 使用相同的安全退出流程。若下载或存储仍在工作，退出可能等待，不会强制结束或跳过保存。
 
-More development notes are in [docs/NOTES.md](docs/NOTES.md).
+本版本包含审计整改：状态写入具有实例锁和损坏文件保留策略，下载提交与取消有完成屏障，favicon 按 profile/origin 隔离且不读取旧磁盘缓存，界面查找和多窗口状态按窗口隔离。Release 构建仅声明 arm64/x86_64 兼容性，未在 Intel 硬件上验收；构建为 ad-hoc、未公证。
 
-## License
+## 已知限制
 
-ToastPeek is released under the [MIT License](LICENSE).
+- 没有 Widevine、内建密码管理器或任意 Chrome/Safari Web Extension 支持。受保护媒体和登录兼容性需按网站、系统版本实测；系统编解码支持不能证明完整 DRM 播放链路可用。
+- 未公证。
 
-## Third-party software
+开发笔记见 `docs/NOTES.md`。
 
-ToastPeek bundles no third-party code. It links only Apple system frameworks (WebKit, PDFKit, SwiftUI, AppKit) and the system `libsqlite3`, which reads history files during import.
+本仓库未包含临时审计工件、用户路径或截图；发布验证仅记录实际运行的命令及其限制。

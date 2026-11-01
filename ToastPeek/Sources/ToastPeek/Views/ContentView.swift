@@ -29,7 +29,7 @@ private struct WindowDragGestureModifier: ViewModifier {
 }
 
 /// Hands the hosting NSWindow to the window state once it exists.
-private struct WindowAccessor: NSViewRepresentable {
+struct WindowAccessor: NSViewRepresentable {
     let onWindow: (NSWindow) -> Void
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
@@ -42,6 +42,7 @@ private struct WindowAccessor: NSViewRepresentable {
 struct ContentView: View {
     @EnvironmentObject var store: BrowserStore
     @EnvironmentObject var windowState: WindowTabState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let cardMargin: CGFloat = 8
     @State private var sidebarDragStartWidth: CGFloat?
@@ -55,7 +56,7 @@ struct ContentView: View {
             SpaceBackdrop(color: windowState.space(in: store).color)
                 .ignoresSafeArea()
                 .modifier(WindowDragGestureModifier())
-                .animation(.easeInOut(duration: 0.35), value: windowState.space(in: store).id)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: windowState.space(in: store).id)
 
             HStack(spacing: 0) {
                 if store.isSidebarVisible && !isFullscreenContent {
@@ -79,7 +80,7 @@ struct ContentView: View {
             .background(SidebarRevealTracker(isEnabled: !store.isSidebarVisible && !isFullscreenContent,
                                              isRevealed: peekingSidebar,
                                              sidebarWidth: sidebarWidth) { show in
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { peekingSidebar = show }
+                withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.9)) { peekingSidebar = show }
             })
 
             // Hidden sidebar, revealed from the left edge: floats over the page.
@@ -94,11 +95,10 @@ struct ContentView: View {
                     .zIndex(2)
             }
 
-            VStack(alignment: .trailing, spacing: 8) {
-                if store.isFindBarVisible { FindBarView().transition(.move(edge: .top).combined(with: .opacity)) }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .padding(.top, cardMargin + 10).padding(.trailing, cardMargin + 10)
+            PageFindOverlay(state: windowState.pageState,
+                            tabID: windowState.focusedPaneTabID ?? windowState.selectedTabID)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, cardMargin + 10).padding(.horizontal, cardMargin + 10)
 
             if let toast = store.toast {
                 Text(toast)
@@ -116,6 +116,7 @@ struct ContentView: View {
                     .onTapGesture { store.commandBarMode = nil }
                     .transition(.opacity)
                 CommandBarView()
+                    .padding(.horizontal, 20)
                     .padding(.top, 90)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
@@ -130,12 +131,11 @@ struct ContentView: View {
                              set: { store.spaceEditor = $0 })) { request in
             SpaceEditorView(request: request).environmentObject(store)
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: store.isSidebarVisible)
-        .animation(.spring(response: 0.34, dampingFraction: 0.9), value: windowState.library == nil)
-        .animation(.spring(response: 0.24, dampingFraction: 0.9), value: store.commandBarMode)
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: store.toast)
-        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: store.isFindBarVisible)
-        .animation(.easeInOut(duration: 0.2), value: isFullscreenContent)
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.9), value: store.isSidebarVisible)
+        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.9), value: windowState.library == nil)
+        .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.9), value: store.commandBarMode)
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: store.toast)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: isFullscreenContent)
         .onChange(of: store.isSidebarVisible) {
             if store.isSidebarVisible { peekingSidebar = false }
             updateWindowButtons()
@@ -166,7 +166,7 @@ struct ContentView: View {
     private func dragSidebarResize(_ dx: CGFloat) {
         let proposed = Double((sidebarDragStartWidth ?? CGFloat(store.sidebarWidth)) + dx)
         if proposed < 140 {
-            if store.isSidebarVisible { withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { store.isSidebarVisible = false } }
+            if store.isSidebarVisible { withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.9)) { store.isSidebarVisible = false } }
         } else {
             if !store.isSidebarVisible { store.isSidebarVisible = true }
             store.sidebarWidth = min(max(proposed, BrowserStore.sidebarWidthRange.lowerBound),
@@ -220,6 +220,7 @@ struct ContentView: View {
 private struct EmptyWindowView: View {
     @EnvironmentObject var store: BrowserStore
     @EnvironmentObject var windowState: WindowTabState
+    @ObservedObject private var shortcuts = ShortcutStore.shared
     var body: some View {
         VStack(spacing: 14) {
             SpaceIcon(space: windowState.space(in: store), size: 30)
@@ -234,10 +235,10 @@ private struct EmptyWindowView: View {
                     Image(systemName: "magnifyingglass")
                     Text("Search or enter address")
                     Spacer(minLength: 24)
-                    Text("⌘T").foregroundStyle(.tertiary)
+                    Text(ShortcutStore.display(action: "menuCommandBar")).foregroundStyle(.tertiary)
                 }
                 .font(.system(size: 13))
-                .padding(.horizontal, 14).frame(width: 320, height: 36)
+                .padding(.horizontal, 14).frame(height: 36).frame(maxWidth: 320)
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(.plain)
@@ -260,14 +261,25 @@ private struct SplitPanes: View {
 
     var body: some View {
         GeometryReader { geo in
-            let widths = paneWidths(total: geo.size.width)
-            HStack(spacing: 0) {
-                ForEach(Array(panes.enumerated()), id: \.element.id) { index, tab in
-                    paneCard(tab)
-                        .frame(width: widths[index])
-                    if index < panes.count - 1 {
-                        gutterHandle(index: index, total: geo.size.width)
+            let total = SplitLayout.contentWidth(viewport: geo.size.width, count: panes.count, gutter: gutter)
+            let weights = fractions.count == panes.count ? fractions : Array(repeating: CGFloat(1), count: panes.count)
+            let widths = SplitLayout.widths(viewport: geo.size.width, fractions: weights, gutter: gutter)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) {
+                        ForEach(Array(panes.enumerated()), id: \.element.id) { index, tab in
+                            paneCard(tab)
+                                .frame(width: widths[index], height: geo.size.height)
+                                .id(tab.id)
+                            if index < panes.count - 1 {
+                                gutterHandle(index: index, total: total)
+                            }
+                        }
                     }
+                    .frame(width: total, height: geo.size.height)
+                }
+                .onChange(of: windowState.focusedPaneTabID) {
+                    if let id = windowState.focusedPaneTabID { proxy.scrollTo(id, anchor: .center) }
                 }
             }
         }
@@ -279,12 +291,6 @@ private struct SplitPanes: View {
 
     private func resetFractions() {
         fractions = Array(repeating: 1 / CGFloat(max(panes.count, 1)), count: panes.count)
-    }
-
-    private func paneWidths(total: CGFloat) -> [CGFloat] {
-        let usable = total - gutter * CGFloat(panes.count - 1)
-        let f = fractions.count == panes.count ? fractions : Array(repeating: 1 / CGFloat(panes.count), count: panes.count)
-        return f.map { max(200, $0 * usable) }
     }
 
     private func paneCard(_ tab: BrowserTab) -> some View {
@@ -303,17 +309,42 @@ private struct SplitPanes: View {
             .simultaneousGesture(TapGesture().onEnded { store.notePaneFocused(tab.id) })
     }
 
+    private func adjustGutter(index: Int, delta: CGFloat, total: CGFloat) {
+        let weights = fractions.count == panes.count ? fractions : Array(repeating: CGFloat(1), count: panes.count)
+        var widths = SplitLayout.widths(viewport: total, fractions: weights, gutter: gutter)
+        guard widths.indices.contains(index + 1) else { return }
+        let change = min(max(delta, 200 - widths[index]), widths[index + 1] - 200)
+        widths[index] += change
+        widths[index + 1] -= change
+        let usable = max(total - gutter * CGFloat(panes.count - 1), 1)
+        fractions = widths.map { $0 / usable }
+    }
+
     private func gutterHandle(index: Int, total: CGFloat) -> some View {
         Color.clear
             .frame(width: gutter)
             .contentShape(Rectangle())
+            .focusable()
+            .accessibilityLabel("Resize Split")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: adjustGutter(index: index, delta: 20, total: total)
+                case .decrement: adjustGutter(index: index, delta: -20, total: total)
+                @unknown default: break
+                }
+            }
+            .onKeyPress(.leftArrow) { adjustGutter(index: index, delta: -20, total: total); return .handled }
+            .onKeyPress(.rightArrow) { adjustGutter(index: index, delta: 20, total: total); return .handled }
             .onHover { $0 ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }
             .gesture(DragGesture(minimumDistance: 1)
                 .onChanged { value in
-                    if dragStart == nil { dragStart = fractions }
+                    let usable = max(total - gutter * CGFloat(panes.count - 1), 1)
+                    if dragStart == nil {
+                        let weights = fractions.count == panes.count ? fractions : Array(repeating: CGFloat(1), count: panes.count)
+                        dragStart = SplitLayout.widths(viewport: total, fractions: weights, gutter: gutter).map { $0 / usable }
+                    }
                     guard var f = dragStart, f.indices.contains(index + 1) else { return }
-                    let usable = total - gutter * CGFloat(panes.count - 1)
-                    let delta = value.translation.width / max(usable, 1)
+                    let delta = value.translation.width / usable
                     let pair = f[index] + f[index + 1]
                     let minF = 200 / max(usable, 1)
                     f[index] = min(max(f[index] + delta, minF), pair - minF)

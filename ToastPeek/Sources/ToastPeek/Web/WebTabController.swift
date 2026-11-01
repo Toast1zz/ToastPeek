@@ -89,8 +89,6 @@ final class WebTabController: NSObject, ObservableObject,
 
     private var observations: [NSKeyValueObservation] = []
     private var boostRules: [[String: String]] = []
-    private var findOrdinal = 0
-    private var findCount = 0
     /// Whether the content-blocker list is currently applied to this tab.
     private(set) var contentBlockingApplied = false
     /// URL the tab showed before the current load started. WKWebView.url
@@ -103,7 +101,6 @@ final class WebTabController: NSObject, ObservableObject,
     private var committedURL: String?
     private var navigationGeneration = 0
     private var findGeneration = 0
-    private var faviconTask: Task<Void, Never>?
     private var extensionGeneration = 0
     private var printJobs: [UUID: NativePrintJob] = [:]
     private var certificateChallenges: [String: String] = [:]
@@ -245,8 +242,6 @@ final class WebTabController: NSObject, ObservableObject,
     }
 
     func close() {
-        faviconTask?.cancel()
-        faviconTask = nil
         pendingUploadPanel?.cancel(nil)
         pendingUploadPanel = nil
         observations = []
@@ -420,48 +415,22 @@ final class WebTabController: NSObject, ObservableObject,
         webView?.pageZoom = 1.0
         announceZoom()
     }
-    func find(_ text: String, forward: Bool, findNext: Bool) {
+    func find(_ text: String, forward: Bool) {
         guard let wv = webView, !text.isEmpty else { return }
         findGeneration += 1
         let generation = findGeneration
-        // Count first (JS, case-insensitive), then move the native highlight.
-        let escaped: String = {
-            guard let data = try? JSONSerialization.data(withJSONObject: [text.lowercased()]),
-                  let json = String(data: data, encoding: .utf8) else { return "\"\"" }
-            return String(json.dropFirst().dropLast())
-        }()
-        // `escaped` already includes its JSON quotes, like Boost.jsString.
-        let countJS = "(document.body ? document.body.innerText.toLowerCase().split(\(escaped)).length - 1 : 0)"
-        wv.evaluateJavaScript(countJS) { [weak self, weak wv] result, _ in
-            guard let self, let wv, self.findGeneration == generation else { return }
-            let count = (result as? Int) ?? (result as? Double).map(Int.init) ?? 0
-            self.findCount = max(0, count)
-            let config = WKFindConfiguration()
-            config.backwards = !forward
-            config.wraps = true
-            wv.find(text, configuration: config) { [weak self] found in
-                guard let self, self.findGeneration == generation, self.store?.activeController === self else { return }
-                if found.matchFound, self.findCount > 0 {
-                    if findNext {
-                        self.findOrdinal = forward
-                            ? (self.findOrdinal % self.findCount) + 1
-                            : (self.findOrdinal <= 1 ? self.findCount : self.findOrdinal - 1)
-                    } else {
-                        self.findOrdinal = 1
-                    }
-                    self.store?.updateFindResult(count: self.findCount, activeOrdinal: self.findOrdinal)
-                } else if found.matchFound {
-                    self.store?.updateFindResult(count: 0, activeOrdinal: 0)
-                } else {
-                    self.findOrdinal = 0
-                    self.store?.updateFindResult(count: 0, activeOrdinal: 0)
-                }
-            }
+        let config = WKFindConfiguration()
+        config.backwards = !forward
+        config.wraps = true
+        wv.find(text, configuration: config) { [weak self] found in
+            guard let self, self.findGeneration == generation else { return }
+            // WebKit searches frames and applies its own matching rules; DOM
+            // text counts cannot reliably describe the native result.
+            self.store?.updateFindResult(tabID: self.tabID, count: found.matchFound ? -1 : 0, activeOrdinal: 0)
         }
     }
     func stopFinding() {
         findGeneration += 1
-        findOrdinal = 0
         webView?.find("", configuration: WKFindConfiguration()) { _ in }
         webView?.evaluateJavaScript("window.getSelection().removeAllRanges();") { _, _ in }
     }
@@ -628,7 +597,6 @@ final class WebTabController: NSObject, ObservableObject,
         guard let wv = webView else { return }
         let ucc = wv.configuration.userContentController
         ucc.removeAllUserScripts()
-        ucc.addUserScript(FaviconLoader.userScript)
         ucc.addUserScript(WKUserScript(source: Self.mediaScriptSource,
                                        injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Self.browserWorld))
         ucc.addUserScript(WKUserScript(source: Self.contextScriptSource,
@@ -1120,13 +1088,9 @@ final class WebTabController: NSObject, ObservableObject,
                   self.navigationGeneration == generation, self.store?.canLoadWebContent == true else {
                 decisionHandler(.deny); return
             }
-            let allow = response == .alertFirstButtonReturn
-            if canRemember, remember.state == .on, let store = self.store {
-                var perms = store.sitePermissions
-                perms.remember(origin: originString, profileID: self.dataStoreID, kind: .media, requested: requested, allow: allow)
-                store.sitePermissions = perms
-                store.scheduleSave()
-            }
+            let allow = self.store?.resolveMediaPermission(
+                origin: originString, profileID: self.dataStoreID, requested: requested,
+                response: response, remember: canRemember && remember.state == .on) ?? false
             decisionHandler(allow ? .grant : .deny)
         }
     }
@@ -1169,32 +1133,39 @@ final class WebTabController: NSObject, ObservableObject,
         load(target)
     }
 
-    // MARK: Favicon
-
+    // Only reuse a page image WebKit already loaded under its own policy.
+    // Drawing to canvas fails closed for cross-origin redirects (tainted canvas).
     private func fetchFavicon() {
-        faviconTask?.cancel()
-        guard let view = webView, let pageURL = view.url,
+        guard let wv = webView, let pageURL = wv.url,
               let key = FaviconKey(url: pageURL, profileID: dataStoreID) else { return }
         let navigation = navigationGeneration
-        guard let cache = store?.faviconStore else { return }
-        let cacheGeneration = cache.generation
-        faviconTask = Task { @MainActor [weak self, weak view] in
-            guard let view else { return }
-            let result = try? await view.callAsyncJavaScript(
-                "return document.querySelector('link[rel~=\"icon\"]')?.href ?? ''", arguments: [:], in: nil, contentWorld: .defaultClient)
-            var candidates: [URL] = []
-            if let href = result as? String, let url = URL(string: href),
-               SiteOrigin.make(url) == key.origin { candidates.append(url) }
-            if let fallback = URL(string: "/favicon.ico", relativeTo: pageURL)?.absoluteURL,
-               !candidates.contains(fallback) { candidates.append(fallback) }
-            for url in candidates {
-                guard !Task.isCancelled, self?.navigationGeneration == navigation,
-                      cache.generation == cacheGeneration else { return }
-                if let data = await FaviconLoader.fetch(url, in: view) {
-                    guard !Task.isCancelled, self?.navigationGeneration == navigation else { return }
-                    if cache.store(data, for: key, generation: cacheGeneration) { return }
-                }
+        let cacheGeneration = FaviconStore.shared.generation
+        let script = """
+        (() => {
+          try {
+            const link = document.querySelector('link[rel~="icon"]');
+            if (!link) return null;
+            const icon = new URL(link.href, document.baseURI);
+            if (!['http:', 'https:'].includes(icon.protocol) || icon.username || icon.password || icon.origin !== location.origin) return null;
+            for (let i = 0; i < Math.min(document.images.length, 256); i++) {
+              const image = document.images[i];
+              if (image.crossOrigin !== null || !image.complete || !image.naturalWidth || !image.naturalHeight ||
+                  image.naturalWidth > 1024 || image.naturalHeight > 1024 || image.currentSrc !== icon.href) continue;
+              const canvas = document.createElement('canvas');
+              canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+              canvas.getContext('2d').drawImage(image, 0, 0);
+              const data = canvas.toDataURL('image/png');
+              return data.length <= 699074 ? data.slice(data.indexOf(',') + 1) : null;
             }
+          } catch (_) { }
+          return null;
+        })()
+        """
+        wv.evaluateJavaScript(script) { [weak self, weak wv] result, _ in
+            guard let self, let wv, self.webView === wv, self.navigationGeneration == navigation,
+                  wv.url == pageURL, let encoded = result as? String,
+                  encoded.utf8.count <= 699_052, let data = Data(base64Encoded: encoded) else { return }
+            FaviconStore.shared.store(data, for: key, generation: cacheGeneration)
         }
     }
 
@@ -1207,14 +1178,7 @@ enum BrowserEngineBridge {
     static func clearBrowsingData(dataStoreID: UUID, completion: @escaping @MainActor @Sendable () -> Void = {}) {
         let store = WKWebsiteDataStore(forIdentifier: dataStoreID)
         store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                         modifiedSince: .distantPast) {
-            Task { @MainActor in completion() }
-        }
-    }
-    static func deleteDataStore(dataStoreID: UUID) {
-        WKWebsiteDataStore.remove(forIdentifier: dataStoreID) { error in
-            if let error { NSLog("ToastPeek data store removal failed: %@", error.localizedDescription) }
-        }
+                         modifiedSince: .distantPast, completionHandler: completion)
     }
 }
 

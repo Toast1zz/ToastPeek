@@ -1,27 +1,28 @@
-// ToastPeek.xcconfig: shared build settings for every target (project.yml).
+// ToastPeek.xcconfig — shared build settings for every target (project.yml).
 
+// WebKit build: no engine headers, wrapper or framework on the search
+// paths. (Signing lines below are untouched.)
 CLANG_CXX_LANGUAGE_STANDARD = c++20
 CLANG_CXX_LIBRARY = libc++
 
 // Entitlements: camera and microphone only. Page JavaScript runs in system
 // WebKit processes, so the app itself needs no JIT entitlement.
+// No disable-library-validation:
+// every component is signed with the same Team ID, so hardened-runtime
+// library validation passes naturally.
 CODE_SIGN_ENTITLEMENTS = config/ToastPeek.entitlements
 
-// Signing: ad-hoc by default, so anyone can build without an Apple
-// developer account. To sign with your own certificate, copy
-// Local.xcconfig.example to Local.xcconfig (untracked) and fill it in.
-// A stable identity keeps keychain items trusted across rebuilds; ad-hoc
-// signing changes the code identity on every build.
-CODE_SIGN_IDENTITY = -
+// Keep a stable local development identity in Signing.local.xcconfig.
+// Builds fail when that identity is unavailable. CI explicitly requests ad-hoc
+// signing on the command line; it never installs that build as the daily browser.
+CODE_SIGN_IDENTITY = Apple Development
 CODE_SIGN_STYLE = Manual
-DEVELOPMENT_TEAM =
+#include? "Signing.local.xcconfig"
 ENABLE_HARDENED_RUNTIME = YES
 
-// Debug builds are arm64 only (faster); Release is universal (arm64 + x86_64).
-ARCHS = arm64
+// Debug builds use the host architecture; Release is universal (arm64 + x86_64).
+ARCHS = $(ARCHS_STANDARD)
 ARCHS[config=Release] = arm64 x86_64
 ONLY_ACTIVE_ARCH = YES
 ONLY_ACTIVE_ARCH[config=Release] = NO
 MACOSX_DEPLOYMENT_TARGET = 14.0
-
-#include? "Local.xcconfig"

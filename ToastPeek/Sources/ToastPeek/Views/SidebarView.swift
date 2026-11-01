@@ -28,6 +28,8 @@ struct SidebarView: View {
 
     private var style: SidebarStyle { SidebarStyle(scheme: scheme) }
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         Group {
             if let category = windowState.library {
@@ -38,7 +40,7 @@ struct SidebarView: View {
                     .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.18), value: windowState.library == nil)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: windowState.library == nil)
     }
 
     private var mainSidebar: some View {
@@ -58,13 +60,13 @@ struct SidebarView: View {
                         .padding(.bottom, store.favorites.isEmpty ? 0 : 12)
                     spaceSection
                         .id(windowState.space(in: store).id)
-                        .transition(.asymmetric(
+                        .transition(reduceMotion ? .opacity : .asymmetric(
                             insertion: .move(edge: windowState.spaceSwitchForward ? .trailing : .leading).combined(with: .opacity),
                             removal: .move(edge: windowState.spaceSwitchForward ? .leading : .trailing).combined(with: .opacity)))
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
-                .animation(.spring(response: 0.38, dampingFraction: 0.88), value: windowState.space(in: store).id)
+                .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.88), value: windowState.space(in: store).id)
             }
             .background(SpaceSwipeDetector())
 
@@ -186,7 +188,7 @@ struct SidebarView: View {
     private func handleDrop(_ items: [String], kind: TabKind, folderID: UUID?, before: UUID?) -> Bool {
         guard let raw = items.first, let id = UUID(uuidString: raw),
               let dragged = store.tab(id), !dragged.isArchived, dragged.id != before else { return false }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) {
             store.reorderTab(dragged, targetKind: kind, folderID: folderID, insertBefore: before)
         }
         return true
@@ -230,6 +232,9 @@ private struct SidebarMoreMenu: View {
     @Environment(\.colorScheme) private var scheme
     @State private var hovering = false
     @State private var open = false
+    @StateObject private var shortcuts = ShortcutStore.shared
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button { open.toggle() } label: {
@@ -259,7 +264,7 @@ private struct SidebarMoreMenu: View {
                 }
                 MoreRow(symbol: "sidebar.left", title: "Toggle Sidebar", shortcut: Self.shortcut("menuToggleSidebar")) {
                     open = false
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { store.isSidebarVisible.toggle() }
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.9)) { store.isSidebarVisible.toggle() }
                     store.scheduleSave()
                 }
             }
@@ -271,8 +276,7 @@ private struct SidebarMoreMenu: View {
 
     /// Current (possibly rebound) shortcut of a menu command, e.g. "⌘R".
     private static func shortcut(_ id: String) -> String {
-        guard let row = ShortcutStore.shared.rows().first(where: { $0.id == id }) else { return "" }
-        return ShortcutStore.display(row.binding)
+        ShortcutStore.display(action: id)
     }
 }
 
@@ -286,6 +290,10 @@ private struct MoreRow: View {
     @EnvironmentObject var windowState: WindowTabState
     @State private var hovering = false
 
+    private var selectionForeground: Color {
+        ThemeContrast.usesDarkForeground(hex: windowState.space(in: store).colorHex) ? .black : .white
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
@@ -296,14 +304,14 @@ private struct MoreRow: View {
                 Spacer(minLength: 8)
                 Text(shortcut)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(hovering ? Color.white.opacity(0.65) : Color.secondary)
+                    .foregroundStyle(hovering ? selectionForeground : Color.secondary)
             }
-            .foregroundStyle(hovering ? Color.white : Color.primary)
+            .foregroundStyle(hovering ? selectionForeground : Color.primary)
             .padding(.horizontal, 12)
             .frame(height: 42)
             // The system popover's corner is ~18pt and the panel pads 6pt, so
             // 12pt keeps the highlight concentric with it.
-            .background(hovering ? windowState.space(in: store).color.opacity(0.85) : .clear,
+            .background(hovering ? windowState.space(in: store).color : .clear,
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
@@ -378,6 +386,8 @@ private struct AddressPill: View {
 
     private var tab: BrowserTab? { store.tab(windowState.focusedPaneTabID ?? windowState.selectedTabID) }
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         HStack(spacing: 6) {
             if let tab, tab.url.scheme == "http" {
@@ -418,8 +428,9 @@ private struct AddressPill: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture { store.commandBarMode = .editCurrent }
+        .modifier(KeyboardActivation { store.commandBarMode = .editCurrent })
         .accessibilityAddTraits(.isButton)
-        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
+        .onHover { h in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) { hovering = h } }
     }
 
     private var label: String {
@@ -459,14 +470,16 @@ private struct PillProgress: View {
     @ObservedObject var controller: WebTabController
     @EnvironmentObject var store: BrowserStore
     @EnvironmentObject var windowState: WindowTabState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         GeometryReader { geo in
             Rectangle()
                 .fill(windowState.space(in: store).color.opacity(0.55))
                 .frame(width: geo.size.width * (controller.isLoading ? max(0.05, controller.progress) : 1), height: 2)
                 .opacity(controller.isLoading ? 1 : 0)
-                .animation(.easeOut(duration: 0.25), value: controller.progress)
-                .animation(.easeOut(duration: 0.4), value: controller.isLoading)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: controller.progress)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: controller.isLoading)
                 .frame(maxHeight: .infinity, alignment: .bottom)
         }
         .allowsHitTesting(false)
@@ -507,7 +520,7 @@ private struct FavoriteTile: View {
         let selected = windowState.selectedTabID == tab.id
         let style = SidebarStyle(scheme: scheme)
         let loaded = store.controller(forTabID: tab.id)?.hasBrowser == true
-        FaviconView(key: store.faviconKey(for: tab), size: 20)
+        FaviconView(url: tab.url, profileID: store.isReadOnly ? nil : store.profileSpace(for: tab).dataStoreID, size: 20)
             .opacity(loaded || selected ? 1 : 0.85)
             .frame(maxWidth: .infinity)
             .frame(height: 48)
@@ -516,13 +529,14 @@ private struct FavoriteTile: View {
             .shadow(color: selected ? style.selectedShadow : .clear, radius: 1.5, y: 1)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .onTapGesture { store.select(tab) }
+        .modifier(KeyboardActivation { store.select(tab) })
             .accessibilityAddTraits(.isButton)
             .onHover { hovering = $0 }
             .overlay { TabDragHandle(tabID: tab.id, title: tab.displayTitle) }
             .contextMenu { TabContextMenu(tab: tab, onNewFolder: {}) }
             .help(tab.displayTitle)
             .accessibilityLabel(tab.displayTitle)
-            .accessibilityAddTraits(.isButton)
+            .accessibilityAddTraits(selected ? [.isButton, .isSelected] : [.isButton])
     }
 }
 
@@ -560,7 +574,7 @@ private struct SpaceHeader: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .opacity(hovering ? 1 : 0)
+            .opacity(hovering ? 1 : 0.55)
             .accessibilityLabel("Space Options")
         }
         .padding(.horizontal, 8)
@@ -592,12 +606,14 @@ private struct TodayDivider: View {
     let hasTabs: Bool
     @State private var hovering = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         HStack(spacing: 8) {
             Rectangle().fill(SidebarStyle(scheme: scheme).hairline).frame(height: 1)
             if hasTabs && hovering {
                 Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { store.clearToday() }
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85)) { store.clearToday() }
                 } label: {
                     Label("Clear", systemImage: "arrow.down")
                         .font(.system(size: 11, weight: .medium))
@@ -611,7 +627,7 @@ private struct TodayDivider: View {
         .padding(.horizontal, 8)
         .frame(height: 22)
         .contentShape(Rectangle())
-        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
+        .onHover { h in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { hovering = h } }
     }
 }
 
@@ -635,6 +651,7 @@ private struct NewTabRow: View {
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture { store.commandBarMode = .newTab }
+        .modifier(KeyboardActivation { store.commandBarMode = .newTab })
         .accessibilityAddTraits(.isButton)
         .onHover { hovering = $0 }
         .accessibilityAddTraits(.isButton)
@@ -669,6 +686,22 @@ private struct FolderRow<MenuItems: View>: View {
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture { store.toggleFolderCollapse(folder) }
+        .modifier(KeyboardActivation { store.toggleFolderCollapse(folder) })
+        .onKeyPress(.rightArrow) {
+            if folder.isCollapsed { store.toggleFolderCollapse(folder) }
+            return .handled
+        }
+        .onKeyPress(.leftArrow) {
+            if !folder.isCollapsed { store.toggleFolderCollapse(folder) }
+            return .handled
+        }
+        .accessibilityRepresentation {
+            DisclosureGroup(isExpanded: Binding(get: { !folder.isCollapsed }, set: { expanded in
+                if expanded == folder.isCollapsed { store.toggleFolderCollapse(folder) }
+            })) {
+                Text("\(count) tabs")
+            } label: { Text(folder.name) }
+        }
         .accessibilityAddTraits(.isButton)
         .onHover { hovering = $0 }
         .contextMenu { menu() }
@@ -692,24 +725,27 @@ private struct DropStrip: View {
 
 /// Favicon that dims behind a small spinner while the tab loads.
 private struct RowIcon: View {
-    @EnvironmentObject var store: BrowserStore
     let tab: BrowserTab
     let controller: WebTabController?
+    @EnvironmentObject var store: BrowserStore
     var body: some View {
-        if let controller { Live(key: store.faviconKey(for: tab), controller: controller) } else { FaviconView(key: store.faviconKey(for: tab), size: 16) }
+        if let controller { Live(tab: tab, controller: controller, isReadOnly: store.isReadOnly) } else { FaviconView(url: tab.url, profileID: store.isReadOnly ? nil : store.profileSpace(for: tab).dataStoreID, size: 16) }
     }
     private struct Live: View {
-        let key: FaviconKey?
+        let tab: BrowserTab
         @ObservedObject var controller: WebTabController
-        var body: some View {
+        let isReadOnly: Bool
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
             ZStack {
-                FaviconView(key: key, size: 16).opacity(controller.isLoading ? 0.3 : 1)
+                FaviconView(url: tab.url, profileID: isReadOnly ? nil : controller.dataStoreID, size: 16).opacity(controller.isLoading ? 0.3 : 1)
                 if controller.isLoading {
                     ProgressView().controlSize(.mini).scaleEffect(0.65).transition(.opacity)
                 }
             }
             .frame(width: 16, height: 16)
-            .animation(.easeOut(duration: 0.15), value: controller.isLoading)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: controller.isLoading)
         }
     }
 }
@@ -768,9 +804,12 @@ struct TabRowView<MenuItems: View>: View {
     @Environment(\.colorScheme) private var scheme
     @State private var hovering = false
     @State private var dropTargeted = false
+    @FocusState private var keyboardFocused: Bool
 
     private var isSelected: Bool { windowState.selectedTabID == tab.id }
     private var isInSplit: Bool { windowState.splitTabIDs.contains(tab.id) }
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let style = SidebarStyle(scheme: scheme)
@@ -787,9 +826,8 @@ struct TabRowView<MenuItems: View>: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
-            if hovering {
-                Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { store.close(tab) }
+            Button {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { store.close(tab) }
                 } label: {
                     Image(systemName: tab.kind == .today ? "xmark" : "minus")
                         .font(.system(size: 10, weight: .bold))
@@ -800,7 +838,7 @@ struct TabRowView<MenuItems: View>: View {
                 .buttonStyle(.plain)
                 .help(tab.kind == .today ? "Close Tab" : "Unload Tab")
                 .accessibilityLabel(tab.kind == .today ? "Close Tab" : "Unload Tab")
-            }
+                .opacity(hovering || keyboardFocused ? 1 : 0.45)
         }
         .padding(.leading, 8)
         .padding(.trailing, 6)
@@ -817,13 +855,18 @@ struct TabRowView<MenuItems: View>: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { store.select(tab) }
+        .modifier(KeyboardActivation { store.select(tab) })
+        .focused($keyboardFocused)
         .accessibilityAddTraits(.isButton)
         .onHover { hovering = $0 }
         .overlay { TabDragHandle(tabID: tab.id, title: tab.displayTitle) }
         .contextMenu { menu() }
         .dropDestination(for: String.self) { items, _ in onDrop(items) } isTargeted: { dropTargeted = $0 }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(tab.displayTitle)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+        .accessibilityAction { store.select(tab) }
+        .accessibilityAction(named: Text(tab.kind == .today ? "Close Tab" : "Unload Tab")) { store.close(tab) }
     }
 }
 
@@ -950,6 +993,8 @@ private struct SpaceDot: View {
                     in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture { store.switchSpace(to: space.id) }
+        .modifier(KeyboardActivation { store.switchSpace(to: space.id) })
+        .accessibilityAddTraits(active ? [.isSelected] : [])
         .onHover { hovering = $0 }
         .help(index <= 9 ? "\(space.name)  ⌃\(index)" : space.name)
         .accessibilityLabel(space.name)
@@ -971,10 +1016,12 @@ private struct SpaceDot: View {
 /// downloading, a thin ring around it shows the progress.
 private struct LibraryButton: View {
     @EnvironmentObject var store: BrowserStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         ZStack {
             ChromeButton(symbol: "archivebox", label: "Library") {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { store.openLibrary() }
+                withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.9)) { store.openLibrary() }
             }
             if let p = store.activeDownloadProgress {
                 Circle()
@@ -983,7 +1030,7 @@ private struct LibraryButton: View {
                     .rotationEffect(.degrees(-90))
                     .frame(width: 24, height: 24)
                     .allowsHitTesting(false)
-                    .animation(.easeOut(duration: 0.3), value: p)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: p)
             }
         }
     }
@@ -1050,6 +1097,8 @@ struct Collapsible<Content: View>: View {
     @ViewBuilder var content: Content
     @State private var height: CGFloat?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         content
             .fixedSize(horizontal: false, vertical: true)
@@ -1062,6 +1111,22 @@ struct Collapsible<Content: View>: View {
             .clipped()
             .opacity(expanded ? 1 : 0)
             .allowsHitTesting(expanded)
-            .animation(.spring(response: 0.34, dampingFraction: 0.9), value: expanded)
+            .disabled(!expanded)
+            .accessibilityHidden(!expanded)
+            .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.9), value: expanded)
+    }
+}
+
+/// Adds explicit keyboard and VoiceOver activation without nesting a Button around
+/// rows that already contain close/mute buttons or an AppKit drag overlay.
+struct KeyboardActivation: ViewModifier {
+    let action: () -> Void
+    init(_ action: @escaping () -> Void) { self.action = action }
+    func body(content: Content) -> some View {
+        content
+            .focusable()
+            .onKeyPress(.return) { action(); return .handled }
+            .onKeyPress(.space) { action(); return .handled }
+            .accessibilityAction { action() }
     }
 }

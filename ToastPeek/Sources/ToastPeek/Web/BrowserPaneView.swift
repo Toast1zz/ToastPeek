@@ -8,7 +8,13 @@ struct BrowserPaneView: View {
     @EnvironmentObject var store: BrowserStore
 
     var body: some View {
-        if tab.viewSourceFor != nil {
+        if store.isReadOnly {
+            ContentUnavailableView {
+                Label("Read-only session", systemImage: "lock")
+            } description: {
+                Text(store.persistenceError ?? "")
+            }
+        } else if tab.viewSourceFor != nil {
             ViewSourceView(tab: tab)
         } else {
             LivePane(tab: tab, controller: store.controller(for: tab))
@@ -21,6 +27,7 @@ private struct LivePane: View {
     let tab: BrowserTab
     @ObservedObject var controller: WebTabController
     @EnvironmentObject var store: BrowserStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         WebContainerHost(controller: controller)
@@ -47,7 +54,7 @@ private struct LivePane: View {
                 ProgressLine(isLoading: controller.isLoading, progress: controller.progress,
                              tint: store.space(for: tab).color)
             }
-            .animation(.easeOut(duration: 0.12), value: controller.hoveredLink.isEmpty)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: controller.hoveredLink.isEmpty)
     }
 }
 
@@ -56,6 +63,7 @@ private struct ProgressLine: View {
     let isLoading: Bool
     let progress: Double
     let tint: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
@@ -63,8 +71,8 @@ private struct ProgressLine: View {
                 .fill(tint)
                 .frame(width: geo.size.width * max(0.08, isLoading ? progress : 1), height: 2)
                 .opacity(isLoading ? 1 : 0)
-                .animation(.easeOut(duration: 0.25), value: progress)
-                .animation(.easeOut(duration: 0.35).delay(isLoading ? 0 : 0.15), value: isLoading)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: progress)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.35).delay(isLoading ? 0 : 0.15), value: isLoading)
         }
         .frame(height: 2)
         .allowsHitTesting(false)

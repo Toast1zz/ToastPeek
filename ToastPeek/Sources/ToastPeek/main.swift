@@ -9,15 +9,43 @@ import CoreServices // AEEventClass / keyDirectObject for the GURL handler
 // the ObjC runtime by bare name.
 @objc(ToastPeekApplication)
 final class ToastPeekApplication: NSApplication {
-
-    /// AppKit won't quit while a window shows a sheet, so Cmd+Q, `kill` and
-    /// the installer's quit would do nothing behind an open prompt. Close
-    /// open sheets first (a permission prompt then counts as a one-time deny).
+    private var terminationScheduled = false
+    fileprivate var terminationPrepared = false
+    /// Prepare persistence and WebKit cancellation before asking AppKit to
+    /// terminate. This avoids AppKit's terminateLater nested loop starving
+    /// the main dispatch callbacks used by those asynchronous operations.
     override func terminate(_ sender: Any?) {
-        for window in windows {
-            if let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .abort) }
+        guard !terminationScheduled else { return }
+        terminationScheduled = true
+        let timer = Timer(timeInterval: 0, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                for window in self.windows {
+                    if let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .abort) }
+                }
+                guard let delegate = self.delegate as? ToastPeekAppDelegate else {
+                    self.terminationScheduled = false
+                    return
+                }
+                delegate.prepareTermination { [weak self] shouldTerminate in
+                    guard let self else { return }
+                    guard shouldTerminate else {
+                        self.terminationScheduled = false
+                        self.terminationPrepared = false
+                        return
+                    }
+                    self.terminationPrepared = true
+                    self.finishPreparedTermination()
+                }
+            }
         }
-        super.terminate(sender)
+        RunLoop.main.add(timer, forMode: .common)
+    }
+    private func finishPreparedTermination() {
+        guard terminationPrepared else { return }
+        super.terminate(nil)
+        terminationPrepared = false
+        terminationScheduled = false
     }
 }
 
@@ -407,10 +435,9 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
 
     }
 
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        var quitWithoutSaving = false
-        let decision: NSApplication.TerminateReply = MainActor.assumeIsolated {
-            if store.isReadOnly || store.flush() { return .terminateNow }
+    func prepareTermination(completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        let decision: (reply: NSApplication.TerminateReply, quitWithoutSaving: Bool) = MainActor.assumeIsolated {
+            if store.isReadOnly || store.flush() { return (.terminateNow, false) }
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = String(localized: "Your changes have not been saved")
@@ -419,20 +446,28 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
             alert.addButton(withTitle: String(localized: "Cancel"))
             alert.addButton(withTitle: String(localized: "Quit Without Saving"))
             switch alert.runModal() {
-            case .alertFirstButtonReturn: return store.flush() ? .terminateNow : .terminateCancel
-            case .alertThirdButtonReturn: quitWithoutSaving = true; return .terminateNow
-            default: return .terminateCancel
+            case .alertFirstButtonReturn: return (store.flush() ? .terminateNow : .terminateCancel, false)
+            case .alertThirdButtonReturn: return (.terminateNow, true)
+            default: return (.terminateCancel, false)
             }
         }
-        guard decision == .terminateNow else { return decision }
-        // WKDownload cancellation is asynchronous. Await it before process
-        // exit so callbacks can release temporary files and profile handles.
+        guard decision.reply == .terminateNow else { completion(false); return }
         store.downloadManager.cancelAll(keepingResumeData: false) { [weak self] in
-            guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
+            guard let self else { completion(true); return }
             let saved = self.store.isReadOnly || self.store.flush()
-            sender.reply(toApplicationShouldTerminate: quitWithoutSaving || saved)
+            completion(decision.quitWithoutSaving || saved)
         }
-        return .terminateLater
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let app = sender as? ToastPeekApplication else { return .terminateCancel }
+        if app.terminationPrepared { return .terminateNow }
+        // Dock and quit Apple Events can enter the delegate without calling
+        // the NSApplication override first. Start the same preflight path;
+        // the initial request is cancelled while the asynchronous preparation
+        // schedules the final synchronous termination pass.
+        app.terminate(nil)
+        return .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -631,7 +666,15 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
                     && store.spaces[menuItem.tag].id == store.currentSpaceID ? .on : .off
             default: break
             }
-            return true
+            switch menuItem.action {
+            case #selector(menuOpenLocation):
+                return !keyWindowIsAuxiliary || store.activePeekPageState != nil
+            case #selector(menuFind), #selector(menuFindNext), #selector(menuFindPrevious):
+                return (!keyWindowIsAuxiliary || store.activePeekPageState != nil)
+                    && store.commandTargetTab != nil
+            default:
+                return true
+            }
         }
     }
 
@@ -671,6 +714,7 @@ final class ToastPeekAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
     }
     @objc private func menuOpenLocation() {
         MainActor.assumeIsolated {
+            if store.focusPeekAddress() { return }
             if keyWindowIsAuxiliary { return }
             store.commandBarMode = store.commandTargetTab == nil ? .newTab : .editCurrent
         }

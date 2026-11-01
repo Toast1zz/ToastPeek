@@ -21,10 +21,31 @@ extension View {
     func floatingPanel(radius: CGFloat = 10) -> some View { modifier(FloatingPanelBackground(radius: radius)) }
 }
 
+/// A small observer avoids forwarding one window's transient find state through
+/// the application-wide store (and consequently every other window).
+struct PageFindOverlay: View {
+    @ObservedObject var state: BrowserPageState
+    let tabID: UUID?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            if state.isFindBarVisible {
+                FindBarView(state: state, tabID: tabID)
+                    .frame(maxWidth: 390)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: state.isFindBarVisible)
+    }
+}
+
 /// Find in page (Cmd+F): typing restarts the search, Return / chevrons step
 /// through matches, Esc closes.
 struct FindBarView: View {
     @EnvironmentObject var store: BrowserStore
+    @ObservedObject var state: BrowserPageState
+    let tabID: UUID?
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -32,38 +53,41 @@ struct FindBarView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-            TextField("Find on page", text: $store.findText)
+            TextField("Find on page", text: $state.findText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .frame(width: 180)
+                .frame(minWidth: 70, idealWidth: 180, maxWidth: 180)
                 .focused($focused)
-                .onSubmit { store.findNext(forward: !NSEvent.modifierFlags.contains(.shift)) }
-                .onChange(of: store.findText) { store.performFind() }
-                .onKeyPress(.escape) { store.hideFindBar(); return .handled }
+                .onSubmit { store.findNext(in: state, forward: !NSEvent.modifierFlags.contains(.shift)) }
+                .onChange(of: state.findText) { store.performFind(in: state, tabID: tabID) }
+                .onKeyPress(.escape) { store.hideFindBar(in: state); return .handled }
             Text(countText)
                 .font(.system(size: 11.5).monospacedDigit())
-                .foregroundStyle(Color(nsColor: store.findMatchCount == 0 && !store.findText.isEmpty
+                .foregroundStyle(Color(nsColor: state.findMatchCount == 0 && !state.findText.isEmpty
                                        ? .systemRed : .secondaryLabelColor))
                 .frame(minWidth: 54, alignment: .trailing)
             Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 1, height: 16)
-            ChromeButton(symbol: "chevron.up", label: "Previous Match", enabled: store.findMatchCount > 0, size: 22) {
-                store.findNext(forward: false)
+            ChromeButton(symbol: "chevron.up", label: "Previous Match", enabled: state.findMatchCount != 0, size: 22) {
+                store.findNext(in: state, forward: false)
             }
-            ChromeButton(symbol: "chevron.down", label: "Next Match", enabled: store.findMatchCount > 0, size: 22) {
-                store.findNext(forward: true)
+            ChromeButton(symbol: "chevron.down", label: "Next Match", enabled: state.findMatchCount != 0, size: 22) {
+                store.findNext(in: state, forward: true)
             }
-            ChromeButton(symbol: "xmark", label: "Close", size: 22) { store.hideFindBar() }
+            ChromeButton(symbol: "xmark", label: "Close", size: 22) { store.hideFindBar(in: state) }
         }
         .padding(.leading, 12).padding(.trailing, 6)
         .frame(height: 36)
         .floatingPanel()
         .onAppear { focused = true }
+        .onChange(of: state.findFocusRequest) { focused = true }
+        .onChange(of: tabID) { store.performFind(in: state, tabID: tabID) }
     }
 
     private var countText: String {
-        if store.findText.isEmpty { return "" }
-        if store.findMatchCount == 0 { return String(localized: "No matches") }
-        if store.findActiveOrdinal > 0 { return String(localized: "\(store.findActiveOrdinal) of \(store.findMatchCount)") }
-        return "\(store.findMatchCount)"
+        if state.findText.isEmpty { return "" }
+        if state.findMatchCount == 0 { return String(localized: "No matches") }
+        if state.findMatchCount < 0 { return String(localized: "Match found") }
+        if state.findActiveOrdinal > 0 { return String(localized: "\(state.findActiveOrdinal) of \(state.findMatchCount)") }
+        return "\(state.findMatchCount)"
     }
 }

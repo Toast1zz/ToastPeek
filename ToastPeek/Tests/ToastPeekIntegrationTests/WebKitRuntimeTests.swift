@@ -16,6 +16,12 @@ final class WebKitRuntimeTests: XCTestCase {
         weak var value: WKWebView?
         init(_ value: WKWebView?) { self.value = value }
     }
+    private final class LockedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage = false
+        var value: Bool { lock.lock(); defer { lock.unlock() }; return storage }
+        func set() { lock.lock(); storage = true; lock.unlock() }
+    }
 
     override func setUp() async throws {
         _ = NSApplication.shared
@@ -30,9 +36,8 @@ final class WebKitRuntimeTests: XCTestCase {
         server.standardOutput = FileHandle.nullDevice
         server.standardError = FileHandle.nullDevice
         try server.run()
-        try await waitUntil { FileManager.default.fileExists(atPath: portFile.path) }
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: portFile)) as? [String: Int])
-        base = "http://127.0.0.1:\(try XCTUnwrap(json["port"]))"
+        let port = try await waitForFixturePort(at: portFile)
+        base = "http://127.0.0.1:\(port)"
         store = BrowserStore(stateURL: root.appendingPathComponent("state.json"))
         store.tabs = []
         store.spaces = [BrowserSpace(name: "Runtime test", icon: "house", colorHex: "#7C6FF0")]
@@ -44,7 +49,11 @@ final class WebKitRuntimeTests: XCTestCase {
 
     override func tearDown() async throws {
         let profileIDs = store?.spaces.map(\.dataStoreID) ?? []
-        store?.downloadManager.cancelAll(keepingResumeData: false)
+        if let store {
+            await withCheckedContinuation { continuation in
+                store.downloadManager.cancelAll(keepingResumeData: false) { continuation.resume() }
+            }
+        }
         for id in Array(store?.controllers.keys ?? [:].keys) { store?.unload(id) }
         for window in windows { window.orderOut(nil); window.contentView = nil; window.close() }
         windows = []
@@ -58,6 +67,28 @@ final class WebKitRuntimeTests: XCTestCase {
         if server?.isRunning == true { server.terminate() }
         server = nil
         if let root { try? FileManager.default.removeItem(at: root) }
+    }
+
+    private func waitForFixturePort(at url: URL) async throws -> Int {
+        let deadline = Date().addingTimeInterval(12)
+        var lastData = Data()
+        while Date() < deadline {
+            // Python's write_text creates/truncates the file before writing.
+            // Existence, or one successful read, does not mean JSON is complete.
+            if let data = try? Data(contentsOf: url) {
+                lastData = data
+                if let object = try? JSONSerialization.jsonObject(with: data),
+                   let json = object as? [String: Int], let port = json["port"],
+                   (1...65535).contains(port) { return port }
+            }
+            guard server.isRunning else {
+                throw NSError(domain: "RuntimeFixtureStartup", code: Int(server.terminationStatus),
+                    userInfo: [NSLocalizedDescriptionKey: "Fixture exited before publishing a complete port record"])
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        throw NSError(domain: "RuntimeFixtureStartup", code: 1, userInfo: [NSLocalizedDescriptionKey:
+            "Timed out waiting for complete fixture port JSON; received \(String(decoding: lastData, as: UTF8.self))"])
     }
 
     private func waitUntil(timeout: TimeInterval = 12, label: String = "condition", _ predicate: () -> Bool) async throws {
@@ -118,84 +149,6 @@ final class WebKitRuntimeTests: XCTestCase {
         XCTAssertEqual(store.history.first?.urlString, base + "/page")
     }
 
-    private func iconRequests() throws -> [[String: String]] {
-        let data = try String(contentsOf: root.appendingPathComponent("requests.jsonl"), encoding: .utf8)
-        return try data.split(separator: "\n").map {
-            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: String])
-        }
-    }
-
-    func testFaviconUsesOwningProfileAndCapturedNativeAPIs() async throws {
-        let first = try await show("/page")
-        _ = try await js(first, "document.cookie='identity=alpha;path=/';window.fetch=()=>Promise.reject('page override');window.btoa=()=>'';true")
-        let red = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/authenticated")), in: try XCTUnwrap(first.webView))
-        XCTAssertNotNil(red)
-        let secondSpace = BrowserSpace(name: "Isolated icons", icon: "house", colorHex: "#7C6FF0")
-        store.spaces.append(secondSpace)
-        store.currentSpaceID = secondSpace.id
-        let second = try await show("/page")
-        let blue = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/authenticated")), in: try XCTUnwrap(second.webView))
-        XCTAssertNotNil(blue)
-        XCTAssertNotEqual(red, blue)
-        let requests = try iconRequests().filter { $0["path"] == "/icon/authenticated" }
-        XCTAssertEqual(requests.count, 2)
-        XCTAssertTrue(requests[0]["cookie"]?.contains("identity=alpha") == true)
-        XCTAssertFalse(requests[1]["cookie"]?.contains("identity=alpha") == true)
-    }
-
-    func testFaviconRespectsWebKitContentRules() async throws {
-        let c = try await show("/page")
-        let view = try XCTUnwrap(c.webView)
-        let identifier = "toastpeek-test-icon-" + UUID().uuidString
-        let rules = """
-        [{"trigger":{"url-filter":"/icon/blocked", "resource-type":["raw"]},"action":{"type":"block"}}]
-        """
-        let list: WKContentRuleList = try await withCheckedThrowingContinuation { continuation in
-            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: rules) { list, error in
-                if let list { continuation.resume(returning: list) }
-                else { continuation.resume(throwing: error ?? NSError(domain: "IconRule", code: 1)) }
-            }
-        }
-        view.configuration.userContentController.add(list)
-        defer {
-            view.configuration.userContentController.remove(list)
-            WKContentRuleListStore.default().removeContentRuleList(forIdentifier: identifier) { _ in }
-        }
-        let data = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/blocked")), in: view)
-        XCTAssertNil(data)
-        XCTAssertFalse(try iconRequests().contains { $0["path"] == "/icon/blocked" })
-    }
-
-    func testFaviconRefusesCrossOriginLinksAndRedirects() async throws {
-        let c = try await show("/page")
-        let view = try XCTUnwrap(c.webView)
-        let crossOrigin = base.replacingOccurrences(of: "127.0.0.1", with: "localhost") + "/icon/cross-origin"
-        let direct = await FaviconLoader.fetch(try XCTUnwrap(URL(string: crossOrigin)), in: view)
-        XCTAssertNil(direct)
-        let redirect = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/redirect")), in: view)
-        XCTAssertNil(redirect)
-        let paths = try iconRequests().compactMap { $0["path"] }
-        XCTAssertTrue(paths.contains("/icon/redirect"))
-        XCTAssertFalse(paths.contains("/icon/redirect-target"))
-        XCTAssertFalse(paths.contains("/icon/cross-origin"))
-    }
-
-    func testFaviconRejectsOversizedStreamWithoutContentLength() async throws {
-        let c = try await show("/page")
-        let data = await FaviconLoader.fetch(try XCTUnwrap(URL(string: base + "/icon/oversized")), in: try XCTUnwrap(c.webView))
-        XCTAssertNil(data)
-    }
-
-    func testInvalidLinkedFaviconFallsBackToOriginIcon() async throws {
-        let c = try await show("/favicon-page")
-        let key = try XCTUnwrap(FaviconKey(url: try XCTUnwrap(c.webView?.url), profileID: c.dataStoreID))
-        let slot = store.faviconStore.slot(for: key)
-        try await waitUntil(label: "invalid icon prevented fallback") { slot.image != nil }
-        let paths = try iconRequests().compactMap { $0["path"] }
-        XCTAssertTrue(paths.contains("/icon/invalid"))
-        XCTAssertTrue(paths.contains("/favicon.ico"))
-    }
-
     func testAutomaticPopupIsBlockedByWebKit() async throws {
         let c = try await show("/auto-popup")
         let jsResult3 = try await js(c, "window.result")
@@ -245,20 +198,7 @@ final class WebKitRuntimeTests: XCTestCase {
         }
         XCTAssertTrue(store.downloadManager.canRetry(item.id))
         store.downloadManager.retry(item.id)
-        // Older WebKit on a shared CI runner can spend several seconds
-        // reconnecting before transferring this fixture. Keep the byte check
-        // below, but allow that startup separately from the fixture's 3 s body.
-        do {
-            try await waitUntil(timeout: 30, label: "resumed transfer did not complete") {
-                self.store.downloads.contains { $0.state == "completed" || $0.state == "failed" }
-            }
-        } catch {
-            XCTFail("Resume state: " + store.downloads.map {
-                "\($0.state), \($0.receivedBytes)/\($0.totalBytes) bytes, \($0.errorDescription ?? "no error")"
-            }.joined(separator: "; "))
-            throw error
-        }
-        XCTAssertFalse(store.downloads.contains { $0.state == "failed" }, store.downloads.compactMap(\.errorDescription).joined(separator: "; "))
+        try await waitUntil(label: "resumed transfer did not complete") { self.store.downloads.contains { $0.state == "completed" } }
         let complete = try XCTUnwrap(store.downloads.first { $0.state == "completed" })
         XCTAssertEqual(complete.urlString, base + "/download/slow")
         let data = try Data(contentsOf: URL(fileURLWithPath: complete.fullPath))
@@ -267,13 +207,260 @@ final class WebKitRuntimeTests: XCTestCase {
         XCTAssertEqual(files, [complete.fileName])
     }
 
+    func testFinalMoveCollisionKeepsCompleteTransferAndRetriesOffline() async throws {
+        let c = try await show("/page")
+        let manager = store.downloadManager
+        let commit = manager.commitFile
+        let foreign = Data("created by another process".utf8)
+        manager.commitFile = { source, destination, replace in
+            try foreign.write(to: destination)
+            try commit(source, destination, replace)
+        }
+        c.downloadURL(base + "/download/a")
+        try await waitUntil { self.store.downloads.contains { $0.state == "failed" } }
+        let item = try XCTUnwrap(store.downloads.first)
+        XCTAssertTrue(manager.canSaveCompleted(item.id))
+        XCTAssertTrue(manager.canRetry(item.id))
+        XCTAssertEqual(try Data(contentsOf: item.fileURL), foreign)
+        let partials = try FileManager.default.contentsOfDirectory(at: item.fileURL.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "partial" }
+        XCTAssertEqual(partials.count, 1)
+        let partial = try XCTUnwrap(partials.first)
+        let completeBytes = try Data(contentsOf: partial)
+        XCTAssertEqual(completeBytes, Data(String(repeating: "a\n", count: 32768).utf8))
+        server.terminate() // Recovery must work after the source disappears.
+        manager.commitFile = commit
+        manager.retry(item.id)
+        try await waitUntil { self.store.downloads.first { $0.id == item.id }?.state == "completed" }
+        let saved = try XCTUnwrap(store.downloads.first { $0.id == item.id })
+        XCTAssertEqual(saved.state, "completed")
+        XCTAssertNotEqual(saved.fullPath, item.fullPath)
+        XCTAssertEqual(try Data(contentsOf: saved.fileURL), completeBytes)
+        XCTAssertEqual(try Data(contentsOf: item.fileURL), foreign)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+        XCTAssertFalse(manager.canRetry(item.id))
+    }
+
+    func testCancelAllWaitsForPendingCommitBeforeDiscardingSource() async throws {
+        let c = try await show("/page")
+        let manager = store.downloadManager
+        let entered = LockedFlag()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        manager.commitFile = { _, _, _ in
+            entered.set()
+            release.wait()
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        c.downloadURL(base + "/download/a")
+        try await waitUntil(label: "commit did not start") { entered.value }
+        var finished = false
+        manager.cancelAll(keepingResumeData: false) { finished = true }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(finished, "cleanup must wait for the background commit")
+        release.signal()
+        try await waitUntil(label: "cleanup did not finish") { finished }
+        let partials = try FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: store.resolvedDownloadsFolder), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "partial" }
+        XCTAssertTrue(partials.isEmpty)
+        for item in store.downloads { XCTAssertFalse(manager.canSaveCompleted(item.id)) }
+    }
+
+    func testFailedReplaceConsumesOnlyStagingCopyAndCanSaveAsOffline() async throws {
+        let c = try await show("/page")
+        let manager = store.downloadManager
+        let commit = manager.commitFile
+        manager.commitFile = { source, _, _ in
+            // Model a replace implementation that consumes its input before failing.
+            try FileManager.default.removeItem(at: source)
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        c.downloadURL(base + "/download/b")
+        try await waitUntil { self.store.downloads.contains { $0.state == "failed" } }
+        let item = try XCTUnwrap(store.downloads.first)
+        let target = root.appendingPathComponent("save-again.txt")
+        let existing = Data("existing document".utf8)
+        try existing.write(to: target)
+        XCTAssertTrue(manager.saveCompleted(item.id, to: target, replacingExisting: true))
+        await withCheckedContinuation { continuation in
+            manager.cancelAll { continuation.resume() }
+        }
+        XCTAssertEqual(try Data(contentsOf: target), existing)
+        XCTAssertTrue(manager.canSaveCompleted(item.id))
+        server.terminate()
+        manager.commitFile = commit
+        let alternate = root.appendingPathComponent("saved-elsewhere.txt")
+        XCTAssertTrue(manager.saveCompleted(item.id, to: alternate))
+        try await waitUntil { self.store.downloads.first { $0.id == item.id }?.state == "completed" }
+        XCTAssertEqual(try Data(contentsOf: alternate), Data(String(repeating: "b\n", count: 32768).utf8))
+        XCTAssertEqual(store.downloads.first?.state, "completed")
+        XCTAssertFalse(manager.canSaveCompleted(item.id))
+        let files = try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!)
+        XCTAssertTrue(files.isEmpty, "Successful recovery left transfer/staging files: \(files)")
+    }
+
+    func testRemovingRecordDuringSaveDoesNotDeleteSourceOrRepublish() async throws {
+        let c = try await show("/page")
+        let manager = store.downloadManager
+        let commit = manager.commitFile
+        manager.commitFile = { _, _, _ in throw CocoaError(.fileWriteNoPermission) }
+        c.downloadURL(base + "/download/a")
+        try await waitUntil { self.store.downloads.contains { $0.state == "failed" } }
+        let item = try XCTUnwrap(store.downloads.first)
+        let entered = LockedFlag()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        manager.commitFile = { source, destination, replace in
+            entered.set()
+            release.wait()
+            try commit(source, destination, replace)
+        }
+        let target = root.appendingPathComponent("saved.txt")
+        XCTAssertTrue(manager.saveCompleted(item.id, to: target))
+        try await waitUntil(label: "save did not start") { entered.value }
+        XCTAssertFalse(manager.saveCompleted(item.id, to: root.appendingPathComponent("second.txt")))
+        manager.removeRecord(item.id)
+        XCTAssertFalse(store.downloads.contains { $0.id == item.id })
+        release.signal()
+        await withCheckedContinuation { continuation in manager.cancelAll { continuation.resume() } }
+        XCTAssertEqual(try Data(contentsOf: target), Data(String(repeating: "a\n", count: 32768).utf8))
+        XCTAssertFalse(store.downloads.contains { $0.id == item.id })
+        XCTAssertFalse(manager.canSaveCompleted(item.id))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).isEmpty)
+    }
+
+    func testDiscardCompleteTransferAfterCommitFailureRemovesPartial() async throws {
+        let c = try await show("/page")
+        store.downloadManager.commitFile = { _, _, _ in throw CocoaError(.fileWriteNoPermission) }
+        c.downloadURL(base + "/download/a")
+        try await waitUntil { self.store.downloads.contains { $0.state == "failed" } }
+        let item = try XCTUnwrap(store.downloads.first)
+        XCTAssertTrue(store.downloadManager.canSaveCompleted(item.id))
+        store.downloadManager.removeRecord(item.id)
+        XCTAssertFalse(store.downloadManager.canRetry(item.id))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).isEmpty)
+    }
+
+    func testClearingDataDiscardsFailedCompletedTransferButPreservesSavedFile() async throws {
+        let c = try await show("/page")
+        let saved = root.appendingPathComponent("already-saved.txt")
+        let savedBytes = Data("saved document".utf8)
+        try savedBytes.write(to: saved)
+        store.downloadManager.commitFile = { _, _, _ in throw CocoaError(.fileWriteNoPermission) }
+        c.downloadURL(base + "/download/a")
+        try await waitUntil { self.store.downloads.contains { $0.state == "failed" } }
+        let id = try XCTUnwrap(store.downloads.first?.id)
+        XCTAssertTrue(store.downloadManager.canSaveCompleted(id))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).filter { $0.hasSuffix(".partial") }.count, 1)
+        store.clearBrowsingData()
+        try await waitUntil { !self.store.isClearingData }
+        XCTAssertTrue(store.downloads.isEmpty)
+        XCTAssertFalse(store.downloadManager.canSaveCompleted(id))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).filter { $0.hasSuffix(".partial") }.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: saved), savedBytes)
+    }
+
+    func testReadOnlyStoreCannotClearActiveProfileCookies() async throws {
+        let c = try await show("/page")
+        _ = try await js(c, "document.cookie='audit=present;path=/'")
+        let initial = try await js(c, "document.cookie") as? String ?? ""
+        XCTAssertTrue(initial.contains("audit=present"))
+        XCTAssertTrue(store.flush())
+        let second = BrowserStore(stateURL: root.appendingPathComponent("state.json"))
+        XCTAssertTrue(second.isReadOnly)
+        let tab = try XCTUnwrap(store.tab(c.tabID))
+        await withCheckedContinuation { continuation in
+            second.clearSiteData(for: tab) { success in XCTAssertFalse(success); continuation.resume() }
+        }
+        second.clearSpaceData(try XCTUnwrap(second.spaces.first { $0.id == tab.spaceID }))
+        XCTAssertFalse(second.isClearingData)
+        let cookies = try await js(c, "document.cookie") as? String ?? ""
+        XCTAssertTrue(cookies.contains("audit=present"))
+    }
+
+    private func suspendedResume() async throws -> (WebTabController, UUID, () -> Void) {
+        let c = try await show("/page")
+        c.downloadURL(base + "/download/slow")
+        try await waitUntil { self.store.downloads.contains { $0.state == "inProgress" && $0.receivedBytes > 0 } }
+        let item = try XCTUnwrap(store.downloads.first)
+        await withCheckedContinuation { continuation in
+            store.downloadManager.cancel(item.id) { continuation.resume() }
+        }
+        XCTAssertTrue(store.downloadManager.canRetry(item.id))
+        var release: (() -> Void)?
+        store.downloadManager.resumeCompletionGate = { release = $0 }
+        store.downloadManager.retry(item.id)
+        // Pending ownership is visible even before WebKit's callback arrives.
+        XCTAssertTrue(store.downloadManager.hasActiveDownloads(for: c.tabID))
+        try await waitUntil { release != nil }
+        store.downloadManager.resumeCompletionGate = nil
+        return (c, item.id, try XCTUnwrap(release))
+    }
+
+    func testCancelAllWaitsForLateResumeCancellationAndEscalatesDiscard() async throws {
+        let (c, id, release) = try await suspendedResume()
+        var firstCompleted = false, discarded = false
+        store.downloadManager.cancelAll { firstCompleted = true }
+        store.downloadManager.cancelAll(keepingResumeData: false) { discarded = true }
+        await Task.yield()
+        XCTAssertFalse(firstCompleted)
+        XCTAssertFalse(discarded)
+        release()
+        try await waitUntil { firstCompleted && discarded }
+        XCTAssertFalse(store.downloadManager.hasActiveDownloads(for: c.tabID))
+        XCTAssertFalse(store.downloadManager.canRetry(id))
+        XCTAssertFalse(store.downloads.contains { $0.state == "inProgress" })
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).isEmpty)
+    }
+
+    func testProfileDiscardWaitsForLateResumeBeforeAllowingDeletion() async throws {
+        let (c, id, release) = try await suspendedResume()
+        var discarded = false
+        store.downloadManager.discardProfile(store.spaces[0].dataStoreID) { discarded = true }
+        await Task.yield()
+        XCTAssertFalse(discarded)
+        release()
+        try await waitUntil { discarded }
+        XCTAssertFalse(store.downloadManager.hasActiveDownloads(for: c.tabID))
+        XCTAssertFalse(store.downloadManager.canRetry(id))
+        XCTAssertFalse(store.downloads.contains { $0.state == "inProgress" })
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).isEmpty)
+    }
+
+    func testDeleteSpaceWaitsForPendingResumeAndDoesNotRecreateProfile() async throws {
+        let (c, id, release) = try await suspendedResume()
+        let original = store.spaces[0]
+        store.spaces.append(BrowserSpace(name: "Survivor", icon: "house", colorHex: "#7C6FF0"))
+        store.deleteSpace(original.id)
+        await Task.yield()
+        XCTAssertTrue(store.pendingDataStoreDeletions.contains(original.dataStoreID))
+        release()
+        try await waitUntil { self.store.pendingDataStoreDeletions.isEmpty }
+        XCTAssertFalse(store.downloadManager.hasActiveDownloads(for: c.tabID))
+        XCTAssertFalse(store.downloadManager.canRetry(id))
+        XCTAssertFalse(store.spaces.contains { $0.dataStoreID == original.dataStoreID })
+        XCTAssertFalse(store.downloads.contains { $0.state == "inProgress" })
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).isEmpty)
+    }
+
+    func testClearBrowsingDataWaitsForPendingResumeAndDoesNotAdoptIt() async throws {
+        let (c, id, release) = try await suspendedResume()
+        store.clearBrowsingData()
+        await Task.yield()
+        XCTAssertTrue(store.isClearingData)
+        XCTAssertFalse(store.canLoadWebContent)
+        release()
+        try await waitUntil { !self.store.isClearingData }
+        XCTAssertFalse(store.downloadManager.hasActiveDownloads(for: c.tabID))
+        XCTAssertFalse(store.downloadManager.canRetry(id))
+        XCTAssertFalse(store.downloads.contains { $0.state == "inProgress" })
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.downloadsFolder!).isEmpty)
+    }
+
     func testDeleteSpaceRemovesItsCookieStoreAndPersistsCompletion() async throws {
         var c: WebTabController? = try await show("/page")
         _ = try await js(try XCTUnwrap(c), "document.cookie='deleted_identity=yes;path=/'")
         let oldSpace = store.spaces[0]
-        let iconKey = try XCTUnwrap(FaviconKey(url: URL(string: base)!, profileID: oldSpace.dataStoreID))
-        let icon = store.faviconStore.slot(for: iconKey)
-        try await waitUntil(label: "profile icon did not load") { icon.image != nil }
         let second = BrowserSpace(name: "Surviving identity", icon: "house", colorHex: "#7C6FF0")
         store.spaces.append(second)
         let releasedView = WeakView(c?.webView)
@@ -286,9 +473,6 @@ final class WebKitRuntimeTests: XCTestCase {
             XCTFail("Profile cleanup: " + (store.toast ?? "no error") + "; " + (store.persistenceError ?? "no persistence error"))
             throw error
         }
-        XCTAssertNil(icon.image)
-        let iconFiles = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Favicons").path)
-        XCTAssertFalse(iconFiles.contains { $0.hasPrefix(oldSpace.dataStoreID.uuidString + ".") })
         XCTAssertTrue(store.flush())
         let saved = try XCTUnwrap(StateFile.decode(Data(contentsOf: root.appendingPathComponent("state.json"))))
         XCTAssertTrue(saved.pendingDataStoreDeletions?.isEmpty == true)

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import ImageIO
 import UniformTypeIdentifiers
 
 /// The Library: the button at the sidebar's bottom-left turns the sidebar
@@ -58,6 +57,7 @@ struct LibrarySidebarView: View {
     @EnvironmentObject var windowState: WindowTabState
     @Environment(\.colorScheme) private var scheme
     @State private var search = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -78,13 +78,13 @@ struct LibrarySidebarView: View {
             Spacer().frame(height: 34)
             ForEach(LibraryCategory.allCases) { c in
                 RailButton(category: c, selected: c == category) {
-                    withAnimation(.easeOut(duration: 0.15)) { windowState.library = c }
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { windowState.library = c }
                 }
             }
             Spacer(minLength: 0)
             HStack {
                 ChromeButton(symbol: "arrow.left", label: "Back to Sidebar", size: 30) {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { windowState.library = nil }
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.9)) { windowState.library = nil }
                 }
                 Spacer()
             }
@@ -155,6 +155,7 @@ private struct RailButton: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .accessibilityLabel(category.title)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
 
@@ -257,11 +258,13 @@ private struct LibraryRow<Icon: View, Trailing: View>: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
-        .accessibilityElement(children: .combine)
+        .modifier(KeyboardActivation(action))
+        .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isButton)
     }
 }
 
+@MainActor
 private struct FileIcon: View {
     let path: String
     let fileName: String
@@ -277,61 +280,38 @@ private struct FileIcon: View {
         }
         .task(id: [path, fileName]) {
             icon = nil
-            let data = await LibraryFileIcons.load(path: path, fileName: fileName)
+            let loaded = await LibraryFileIcons.load(path: path, fileName: fileName)
             guard !Task.isCancelled else { return }
-            icon = data.flatMap { NSImage(data: $0) }
+            icon = loaded
         }
     }
 }
 
 /// Icon Services may synchronously inspect a file or contact another process
 /// (notably for disk images). Keep that work out of SwiftUI's render pass.
-enum LibraryFileIcons {
+@MainActor
+private enum LibraryFileIcons {
     private static let queue = DispatchQueue(label: "app.toastpeek.library-icons", qos: .utility)
-    // Every cache access runs on queue; no mutable cache state escapes it.
-    nonisolated(unsafe) private static let cache: NSCache<NSString, NSData> = {
-        let cache = NSCache<NSString, NSData>()
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
         cache.countLimit = 256
         return cache
     }()
 
-    static func load(path: String, fileName: String) async -> Data? {
-        await withCheckedContinuation { continuation in
+    static func load(path: String, fileName: String) async -> NSImage {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        let key = (path.isEmpty ? "type:\(ext)" : "file:\(path)") as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        let icon: NSImage = await withCheckedContinuation { continuation in
             queue.async {
-                let ext = (fileName as NSString).pathExtension.lowercased()
-                let key = (path.isEmpty ? "type:\(ext)" : "file:\(path)") as NSString
-                if let cached = cache.object(forKey: key) {
-                    continuation.resume(returning: cached as Data)
-                    return
-                }
                 let exists = !path.isEmpty && FileManager.default.fileExists(atPath: path)
-                let icon = exists ? NSWorkspace.shared.icon(forFile: path)
+                let loaded = exists ? NSWorkspace.shared.icon(forFile: path)
                     : NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
-                // Resolve lazy icon representations here as well. Only a small
-                // immutable PNG crosses back to the main actor, never NSImage.
-                guard let tiff = icon.tiffRepresentation,
-                      let source = CGImageSourceCreateWithData(tiff as CFData, nil),
-                      let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                        kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceThumbnailMaxPixelSize: 64,
-                      ] as CFDictionary) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let data = NSMutableData()
-                guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                CGImageDestinationAddImage(destination, thumbnail, nil)
-                guard CGImageDestinationFinalize(destination) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                cache.setObject(data, forKey: key)
-                continuation.resume(returning: data as Data)
+                continuation.resume(returning: loaded)
             }
         }
+        cache.setObject(icon, forKey: key)
+        return icon
     }
 }
 
@@ -380,11 +360,25 @@ private struct ActiveDownloadRow: View {
             if item.state == "inProgress" {
                 Button("Cancel") { store.downloadManager.cancel(item.id) }
             } else {
+                if store.downloadManager.canSaveCompleted(item.id) {
+                    Button("Save As…") { saveCompleted() }
+                }
                 if store.downloadManager.canRetry(item.id) { Button("Try Again") { store.downloadManager.retry(item.id) } }
                 Button("Remove from List") { store.downloadManager.removeRecord(item.id) }
             }
         }
     }
+    private func saveCompleted() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = item.fileName
+        panel.canCreateDirectories = true
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            store.downloadManager.saveCompleted(item.id, to: url,
+                replacingExisting: FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
     private var progressText: String {
         if item.state == "cancelled" { return String(localized: "Download cancelled") }
         if item.state == "failed" { return item.errorDescription ?? String(localized: "Download failed") }
@@ -440,20 +434,34 @@ private struct DownloadRecordRow: View {
 private struct MediaGrid: View {
     let search: String
     @EnvironmentObject var store: BrowserStore
+    @State private var existingPaths = Set<String>()
+
+    private var mediaPaths: [String] { store.downloadRecords.filter(\.isMedia).map(\.fullPath) }
 
     var body: some View {
         let media = store.downloadRecords.filter {
-            $0.isMedia && FileManager.default.fileExists(atPath: $0.fullPath) && matches(search, $0.fileName)
+            $0.isMedia && existingPaths.contains($0.fullPath) && matches(search, $0.fileName)
         }
-        if media.isEmpty {
-            LibraryEmpty(symbol: "photo.on.rectangle", text: search.isEmpty ? "Downloaded images and videos appear here" : "No matches")
-        } else {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
-                    ForEach(media) { r in MediaTile(record: r) }
+        Group {
+            if media.isEmpty {
+                LibraryEmpty(symbol: "photo.on.rectangle", text: search.isEmpty ? "Downloaded images and videos appear here" : "No matches")
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
+                        ForEach(media) { r in MediaTile(record: r) }
+                    }
+                    .padding(.trailing, 10).padding(.vertical, 8)
                 }
-                .padding(.trailing, 10).padding(.vertical, 8)
             }
+        }
+        .task(id: mediaPaths, priority: .utility) {
+            let paths = mediaPaths
+            existingPaths.formIntersection(paths)
+            do {
+                let found = try await MediaFileIndex.shared.existingPaths(paths)
+                try Task.checkCancellation()
+                existingPaths = found
+            } catch { /* A newer records list or a closed library superseded this scan. */ }
         }
     }
 }
@@ -479,6 +487,7 @@ private struct MediaTile: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { NSWorkspace.shared.open(record.fileURL) }
+        .modifier(KeyboardActivation { NSWorkspace.shared.open(record.fileURL) })
         .help(record.fileName)
         .accessibilityLabel(record.fileName)
         .accessibilityAddTraits(.isButton)
@@ -488,23 +497,16 @@ private struct MediaTile: View {
         .task(id: record.fullPath) { image = await Self.thumbnail(record.fileURL) }
     }
 
-    /// Decode a bounded thumbnail off the main actor; create AppKit objects on it.
-    @MainActor
+    /// Small decoded thumbnail, off the main thread.
     static func thumbnail(_ url: URL) async -> NSImage? {
-        let data = await Task.detached(priority: .utility) { () -> Data? in
+        await Task.detached(priority: .utility) { () -> NSImage? in
             guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceThumbnailMaxPixelSize: 360,
                   ] as CFDictionary) else { return nil }
-            let data = NSMutableData()
-            guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil)
-            else { return nil }
-            CGImageDestinationAddImage(destination, cg, nil)
-            guard CGImageDestinationFinalize(destination) else { return nil }
-            return data as Data
+            return NSImage(cgImage: cg, size: .zero)
         }.value
-        return data.flatMap { NSImage(data: $0) }
     }
 }
 
@@ -558,7 +560,7 @@ private struct BoostsList: View {
                         let boost = store.boosts[i]
                         LibraryRow(title: boost.name.isEmpty ? boost.hostPattern : boost.name,
                                    subtitle: boost.hostPattern, action: { store.onOpenSettings?(.boosts) }) {
-                            FaviconView(key: nil, size: 18)
+                            FaviconView(size: 18)
                                 .frame(width: 30, height: 30)
                                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         } trailing: {
@@ -594,7 +596,7 @@ private struct ArchivedList: View {
                         ForEach(group) { tab in
                             LibraryRow(title: tab.displayTitle, subtitle: tab.displayHost,
                                        action: { restore(tab) }) {
-                                FaviconView(key: store.faviconKey(for: tab), size: 18).frame(width: 30, height: 30)
+                                FaviconView(url: tab.url, profileID: store.isReadOnly ? nil : store.profileSpace(for: tab).dataStoreID, size: 18).frame(width: 30, height: 30)
                             } trailing: {
                                 EmptyView()
                             }

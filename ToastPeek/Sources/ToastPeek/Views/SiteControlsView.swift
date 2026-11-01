@@ -92,21 +92,6 @@ extension BrowserStore {
         scheduleSave()
     }
 
-    /// Removes this site's cookies and storage from the tab's Space only.
-    func clearSiteData(for tab: BrowserTab, completion: @escaping () -> Void) {
-        let key = Self.siteKey(tab.host)
-        let store = WKWebsiteDataStore(forIdentifier: profileSpace(for: tab).dataStoreID)
-        let types = WKWebsiteDataStore.allWebsiteDataTypes()
-        store.fetchDataRecords(ofTypes: types) { records in
-            let mine = records.filter { r in
-                let name = r.displayName.lowercased()
-                return name == key || name.hasSuffix("." + key) || key.hasSuffix("." + name)
-            }
-            store.removeData(ofTypes: types, for: mine) {
-                MainActor.assumeIsolated { completion() }
-            }
-        }
-    }
 }
 
 struct SiteControlsView: View {
@@ -122,7 +107,7 @@ struct SiteControlsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                FaviconView(key: store.faviconKey(for: tab), size: 20)
+                FaviconView(url: tab.url, profileID: store.isReadOnly ? nil : profileID, size: 20)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(BrowserStore.siteKey(host)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Text(secure ? "Connection is secure" : "Connection is not secure")
@@ -173,12 +158,11 @@ struct SiteControlsView: View {
             ControlCard {
                 ControlButtonRow(symbol: "trash.fill", tint: .red,
                                  title: cleared ? "Site Data Cleared" : "Clear Cookies and Site Data") {
-                    store.clearSiteData(for: tab) {
-                        cleared = true
-                        store.controller(forTabID: tab.id)?.reload()
+                    store.clearSiteData(for: tab) { success in
+                        cleared = success
                     }
                 }
-                .disabled(cleared)
+                .disabled(cleared || store.isReadOnly || store.isClearingData)
             }
         }
         .padding(14)

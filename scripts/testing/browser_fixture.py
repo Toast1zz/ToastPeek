@@ -1,60 +1,73 @@
 #!/usr/bin/env python3
 """Loopback-only pages for repeatable WebKit integration tests; no external traffic."""
+import base64
 import http.server
-import struct
-import zlib
 import json
 from pathlib import Path
 import sys
 import time
+import threading
 import urllib.parse
 
-def png(red, green, blue):
-    def chunk(kind, payload):
-        return struct.pack('>I', len(payload)) + kind + payload + struct.pack('>I', zlib.crc32(kind + payload))
-    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>2I5B', 1, 1, 8, 2, 0, 0, 0))
-            + chunk(b'IDAT', zlib.compress(bytes([0, red, green, blue]))) + chunk(b'IEND', b''))
-
 class Handler(http.server.BaseHTTPRequestHandler):
+    icon_requests = 0
+    icon_requests_lock = threading.Lock()
+
     def log_message(self, *_):
         pass
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
-        with Path(sys.argv[1]).with_name('requests.jsonl').open('a') as log:
-            log.write(json.dumps({'path': self.path, 'cookie': self.headers.get('Cookie', '')}) + '\n')
-        if path == '/icon/redirect':
-            self.send_response(302)
-            self.send_header('Location', f'http://localhost:{self.server.server_port}/icon/redirect-target')
+        if path == '/audit-auth-page':
+            page = (b'<!doctype html><html><head><link rel="icon" href="/audit-auth-icon">'
+                    b'</head><body><img src="/audit-auth-icon"></body></html>')
+            self.send_response(200)
+            self.send_header('Set-Cookie', 'fixture_auth=allowed; Path=/; HttpOnly')
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(page)))
             self.end_headers()
+            self.wfile.write(page)
             return
-        if path == '/icon/stalled':
-            payload = png(0, 0, 255)
+        if path == '/audit-auth-icon':
+            if 'fixture_auth=allowed' not in self.headers.get('Cookie', ''):
+                self.send_response(403)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            payload = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=')
             self.send_response(200)
             self.send_header('Content-Type', 'image/png')
             self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
-            self.wfile.flush()
-            time.sleep(8)
-            try:
-                self.wfile.write(payload)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.wfile.write(payload)
             return
-        if path.startswith('/icon/') or path == '/favicon.ico':
-            payload = (b'x' * 524289 if path == '/icon/oversized' else b'x' * 524288 if path == '/icon/exact-size' else b'not an image' if path == '/icon/invalid'
-                       else png(255, 0, 0) if 'identity=alpha' in self.headers.get('Cookie', '') else png(0, 0, 255))
+        if path == '/audit-icon-count':
+            with Handler.icon_requests_lock:
+                payload = json.dumps({'count': Handler.icon_requests}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if path == '/audit-icon':
+            with Handler.icon_requests_lock:
+                Handler.icon_requests += 1
             self.send_response(200)
             self.send_header('Content-Type', 'image/png')
-            self.send_header('Cache-Control', 'no-store')
-            # The oversized fixture omits a length to exercise the stream limit.
-            if path != '/icon/oversized':
-                self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Content-Length', '0')
             self.end_headers()
-            try:
-                self.wfile.write(payload)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            return
+        if path == '/audit-csp':
+            page = ("<!doctype html><html><head>"
+                    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'none'; connect-src 'none'\">"
+                    f'<link rel="icon" href="http://localhost:{self.server.server_port}/audit-icon">'
+                    '</head><body><img src="/audit-icon"></body></html>').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
             return
         if path.startswith('/download/'):
             payload = (path.rsplit('/', 1)[-1] + '\n').encode() * (262144 if path.endswith('/slow') else 32768)
@@ -79,9 +92,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
-        if path == '/favicon-page':
-            body = '<link rel="icon" href="/icon/invalid"><h1>Fallback icon fixture</h1>'
-        elif path == '/auto-popup':
+        if path == '/auto-popup':
             body = '<h1>Automatic popup test</h1><script>window.result=window.open("/child")===null</script>'
         elif path == '/long':
             body = ''.join(f'<p style="height:100px">Printed paragraph {i}</p>' for i in range(35))
@@ -98,8 +109,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 '</head><body>' + body + '</body></html>').encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
-        if path == '/icon-csp-page':
-            self.send_header('Content-Security-Policy', "default-src 'none'; connect-src 'none'")
         self.send_header('Content-Length', str(len(page)))
         self.end_headers()
         self.wfile.write(page)

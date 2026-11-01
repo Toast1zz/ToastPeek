@@ -1,6 +1,30 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Changes are saved automatically": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "更改会自动保存" } }
+      }
+    },
+    "Read-only session": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "只读会话" } }
+      }
+    },
+    "Resize Split": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "调整分屏大小" } }
+      }
+    },
+    "Save As…": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "另存为…" } }
+      }
+    },
     "%@ from %@": {
       "extractionState": "manual",
       "localizations": {
@@ -2311,6 +2335,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "这个文件里没有历史记录。"
+          }
+        }
+      }
+    },
+    "Match found": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找到匹配"
           }
         }
       }

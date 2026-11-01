@@ -37,16 +37,22 @@ final class ShortcutStore: ObservableObject {
     /// Called for every menu item `installMenus` builds; returns what the item should use.
     func resolve(_ action: Selector, key: String, mods: NSEvent.ModifierFlags) -> (String, NSEvent.ModifierFlags) {
         let id = NSStringFromSelector(action)
+        if Self.excluded.contains(id) { return (key, mods) }
         if let primary = defaults[id], primary != Binding(key: key, mods: mods.rawValue) {
             return (key, mods)
         }
         defaults[id] = Binding(key: key, mods: mods.rawValue)
-        if let o = overrides[id] { return (o.key, o.flags) }
+        if let o = overrides[id] {
+            if Self.reservationConflict(o, excluding: id) == nil { return (o.key, o.flags) }
+            overrides.removeValue(forKey: id)
+            persist()
+        }
         return (key, mods)
     }
 
     func set(_ binding: Binding?, for id: String) {
         let value = binding ?? Binding(key: "", mods: 0)
+        guard !Self.excluded.contains(id), conflict(value, excluding: id) == nil else { return }
         if value == defaults[id] { overrides.removeValue(forKey: id) } else { overrides[id] = value }
         persist()
         apply()
@@ -83,9 +89,81 @@ final class ShortcutStore: ObservableObject {
         return out
     }
 
-    /// Row that already uses this combination, if any.
+    /// Includes responder-chain Edit commands, alternates, hidden tab keys and Spaces.
+    /// Compare case-insensitively: AppKit may express Shift in the key or modifier mask.
     func conflict(_ binding: Binding, excluding id: String) -> Row? {
-        rows().first { $0.id != id && $0.binding == binding && !binding.key.isEmpty }
+        guard !binding.key.isEmpty else { return nil }
+        var found: Row?
+        func walk(_ menu: NSMenu) {
+            for item in menu.items {
+                if let sub = item.submenu { walk(sub); continue }
+                guard let action = item.action, !item.keyEquivalent.isEmpty else { continue }
+                let otherID = NSStringFromSelector(action)
+                let other = Binding(key: item.keyEquivalent, mods: item.keyEquivalentModifierMask.rawValue)
+                if otherID != id, Self.equivalent(binding, other) {
+                    found = Row(id: otherID, title: item.title, binding: other, isCustom: false)
+                    return
+                }
+            }
+        }
+        if let menu = NSApp.mainMenu { walk(menu) }
+        if let found { return found }
+        return Self.reservationConflict(binding, excluding: id)
+    }
+
+    /// Also available while menus are being constructed, before NSApp.mainMenu
+    /// is replaced. This prevents old overrides from stealing a reserved key.
+    private static func reservationConflict(_ binding: Binding, excluding id: String) -> Row? {
+        func row(_ action: String, _ title: String, _ key: String, _ flags: NSEvent.ModifierFlags = .command) -> Row {
+            Row(id: action, title: title, binding: Binding(key: key, mods: flags.rawValue), isCustom: false)
+        }
+        var reserved = [
+            row("undo:", String(localized: "Undo"), "z"),
+            row("redo:", String(localized: "Redo"), "Z", [.command, .shift]),
+            row("cut:", String(localized: "Cut"), "x"),
+            row("copy:", String(localized: "Copy"), "c"),
+            row("paste:", String(localized: "Paste"), "v"),
+            row("pasteAsPlainText:", String(localized: "Paste and Match Style"), "v", [.command, .option, .shift]),
+            row("selectAll:", String(localized: "Select All"), "a"),
+            row("hide:", String(localized: "Hide ToastPeek"), "h"),
+            row("hideOtherApplications:", String(localized: "Hide Others"), "h", [.command, .option]),
+            row("menuQuit", String(localized: "Quit ToastPeek"), "q"),
+            row("performMiniaturize:", String(localized: "Minimize"), "m"),
+            row("toggleFullScreen:", String(localized: "Enter Full Screen"), "f", [.command, .control]),
+            row("menuZoomIn", String(localized: "Zoom In"), "+"),
+            row("menuNextTab", String(localized: "Next Tab"), "}", [.command, .shift]),
+            row("menuPreviousTab", String(localized: "Previous Tab"), "{", [.command, .shift])
+        ]
+        for n in 1...9 {
+            reserved.append(row("menuSwitchSpace:", "Space \(n)", "\(n)", .control))
+            reserved.append(row("menuSelectTabIndex:", String(localized: "Tab \(n)"), "\(n)"))
+        }
+        return reserved.first { $0.id != id && equivalent(binding, $0.binding) }
+    }
+
+    static func equivalent(_ lhs: Binding, _ rhs: Binding) -> Bool {
+        func normalized(_ b: Binding) -> Binding {
+            var flags = b.flags.intersection([.command, .option, .control, .shift])
+            if b.key != b.key.lowercased() { flags.insert(.shift) }
+            return Binding(key: b.key.lowercased(), mods: flags.rawValue)
+        }
+        return normalized(lhs) == normalized(rhs)
+    }
+
+    /// Use an Objective-C action name, e.g. "menuCommandBar" (or "menuSwitchSpace:").
+    /// Reads the installed menu so cleared bindings produce an empty hint.
+    static func display(action: String) -> String {
+        var result = ""
+        func walk(_ menu: NSMenu) {
+            for item in menu.items {
+                if let sub = item.submenu { walk(sub); continue }
+                guard result.isEmpty, let selector = item.action,
+                      NSStringFromSelector(selector) == action, !item.isHidden else { continue }
+                result = display(Binding(key: item.keyEquivalent, mods: item.keyEquivalentModifierMask.rawValue))
+            }
+        }
+        if let menu = NSApp.mainMenu { walk(menu) }
+        return result
     }
 
     func apply() {
@@ -111,7 +189,8 @@ final class ShortcutStore: ObservableObject {
 
     static func display(_ b: Binding) -> String {
         guard !b.key.isEmpty else { return "" }
-        let f = b.flags
+        var f = b.flags
+        if b.key != b.key.lowercased() { f.insert(.shift) }
         var s = ""
         if f.contains(.control) { s += "⌃" }
         if f.contains(.option) { s += "⌥" }

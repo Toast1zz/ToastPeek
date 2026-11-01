@@ -91,8 +91,6 @@ struct StateFile {
             if !profileIDs.contains(s.tabs[i].profileID ?? UUID()) {
                 s.tabs[i].profileID = s.spaces.first { $0.id == s.tabs[i].spaceID }?.dataStoreID ?? s.spaces[0].dataStoreID
             }
-            // Legacy archives get a full retention window after migration.
-            if s.tabs[i].isArchived, s.tabs[i].archivedAt == nil { s.tabs[i].archivedAt = Date() }
             if !s.tabs[i].sortIndex.isFinite { s.tabs[i].sortIndex = Double(i) }
         }
         if !s.archiveAfterHours.isFinite { s.archiveAfterHours = 12 }

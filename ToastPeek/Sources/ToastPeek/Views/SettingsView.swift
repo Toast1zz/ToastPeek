@@ -337,7 +337,7 @@ struct SpacesSettingsView: View {
                             isPresented: Binding(get: { confirmClear != nil }, set: { if !$0 { confirmClear = nil } }),
                             titleVisibility: .visible) {
             Button("Clear", role: .destructive) {
-                if let s = confirmClear { BrowserEngineBridge.clearBrowsingData(dataStoreID: s.dataStoreID) }
+                if let s = confirmClear { store.clearSpaceData(s) }
                 confirmClear = nil
             }
         } message: {
@@ -384,6 +384,7 @@ struct SpacesSettingsView: View {
                 RowDivider(inset: 54)
                 SettingsRow(symbol: "trash.fill", tint: .red, title: "Cookies and site data") {
                     Button("Clear…") { confirmClear = space }
+                        .disabled(store.isReadOnly || store.isClearingData)
                 }
             }
             Spacer()
@@ -461,11 +462,20 @@ struct ExtensionsSettingsPage: View {
                     TextField("All sites", text: $darkHostsText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 220)
-                        .onSubmit { store.setDarkModeHosts(darkHostsText.split(separator: ",").map(String.init)) }
+                        .onChange(of: darkHostsText) { saveDarkHosts() }
+                        .onSubmit { saveDarkHosts() }
+                        .help("Changes are saved automatically")
                 }
             }
             .onAppear { darkHostsText = store.darkModeHosts.joined(separator: ", ") }
+            Text("Changes are saved automatically")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
         }
+        .onDisappear { saveDarkHosts() }
+    }
+
+    private func saveDarkHosts() {
+        store.setDarkModeHosts(darkHostsText.split(separator: ",").map(String.init))
     }
 
     private func builtinRow(path: String, symbol: String, tint: Color, title: LocalizedStringKey) -> some View {
@@ -503,7 +513,7 @@ struct BoostsSettingsView: View {
             ForEach($store.boosts) { $boost in
                 ControlCard {
                     HStack(spacing: 12) {
-                        FaviconView(key: nil, size: 20)
+                        FaviconView(size: 20)
                             .frame(width: 26, height: 26)
                         VStack(alignment: .leading, spacing: 2) {
                             TextField("", text: $boost.name, prompt: Text("Name"))
@@ -576,7 +586,7 @@ struct PrivacySettingsView: View {
                 ForEach(Array(store.sitePermissions.enumerated()), id: \.element.id) { index, perm in
                     if index > 0 { RowDivider(inset: 54) }
                     HStack(spacing: 12) {
-                        FaviconView(key: URL(string: perm.origin).flatMap { FaviconKey(url: $0, profileID: perm.profileID) }, size: 18).frame(width: 26, height: 26)
+                        FaviconView(url: URL(string: perm.origin), profileID: !store.isReadOnly && store.spaces.contains(where: { $0.dataStoreID == perm.profileID }) ? perm.profileID : nil, size: 18).frame(width: 26, height: 26)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(URL(string: perm.origin)?.host ?? perm.origin).font(.system(size: 13.5)).lineLimit(1)
                             Text(Self.summary(perm)).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
@@ -592,6 +602,7 @@ struct PrivacySettingsView: View {
             ControlCard {
                 SettingsRow(symbol: "trash.fill", tint: .red, title: "Clear Browsing Data") {
                     Button("Clear…") { confirmClear = true }
+                        .disabled(store.isReadOnly || store.isClearingData)
                 }
             }
         }

@@ -76,6 +76,115 @@ final class BrowserRegressionTests: XCTestCase {
     }
 
     @MainActor
+    func testClosingWindowSelectionDoesNotClaimAnotherWindowsTab() throws {
+        try withStore { store, _ in
+            store.newTab(urlString: "about:blank")
+            let a = try XCTUnwrap(store.selectedTab)
+            store.newTab(urlString: "about:blank")
+            let b = try XCTUnwrap(store.selectedTab)
+            let first = store.makeWindowState(preferredTabID: a.id)
+            let second = store.makeWindowState(preferredTabID: b.id)
+            store.activeWindowState = first
+            store.close(a)
+            XCTAssertNotEqual(first.selectedTabID, b.id)
+            XCTAssertEqual(second.selectedTabID, b.id)
+        }
+    }
+
+    @MainActor
+    func testRestoreUsesCloseOrderRatherThanLastVisit() throws {
+        try withStore { store, _ in
+            var a = BrowserTab(spaceID: store.currentSpaceID, kind: .today, title: "A", urlString: "about:blank")
+            a.lastVisitedAt = Date(timeIntervalSince1970: 1)
+            let b = BrowserTab(spaceID: store.currentSpaceID, kind: .today, title: "B", urlString: "about:blank")
+            store.tabs = [a, b]
+            store.close(b)
+            store.close(a)
+            store.restoreMostRecentArchived()
+            XCTAssertFalse(try XCTUnwrap(store.tab(a.id)).isArchived)
+            XCTAssertTrue(try XCTUnwrap(store.tab(b.id)).isArchived)
+        }
+    }
+
+    @MainActor
+    func testRemovalOperationsDoNotStealAnotherWindowsSelection() throws {
+        for operation in 0..<3 {
+            try withStore { store, _ in
+                let space = store.currentSpaceID
+                let a = BrowserTab(spaceID: space, kind: .today, title: "A", urlString: "about:blank")
+                let b = BrowserTab(spaceID: space, kind: .pinned, title: "B", urlString: "about:blank")
+                store.tabs = [a, b]
+                let first = store.makeWindowState(preferredTabID: a.id)
+                let second = store.makeWindowState(preferredTabID: b.id)
+                store.activeWindowState = first
+                switch operation {
+                case 0: store.delete(a)
+                case 1: store.clearToday()
+                default: store.move(a, toSpace: store.spaces[1].id)
+                }
+                XCTAssertNotEqual(first.selectedTabID, b.id, "operation \(operation) stole an owned tab")
+                XCTAssertEqual(second.selectedTabID, b.id)
+            }
+        }
+    }
+
+    @MainActor
+    func testClosingSplitAndCrossSpaceFavoriteKeepUniqueOwnership() throws {
+        try withStore { store, _ in
+            let alpha = store.currentSpaceID
+            let beta = store.spaces[1].id
+            let firstTab = BrowserTab(spaceID: alpha, kind: .today, title: "A", urlString: "about:blank")
+            let favorite = BrowserTab(spaceID: nil, kind: .favorite, title: "Favorite", urlString: "about:blank")
+            store.tabs = [firstTab, favorite]
+            let first = store.makeWindowState(preferredTabID: firstTab.id)
+            let second = store.makeWindowState(preferredTabID: favorite.id)
+            second.spaceID = beta
+            store.activeWindowState = first
+            store.openInSplit("about:blank")
+            let split = try XCTUnwrap(first.splitTabIDs.first)
+            store.closeSplitPane(tabID: firstTab.id)
+            XCTAssertEqual(first.selectedTabID, split)
+            XCTAssertEqual(second.selectedTabID, favorite.id)
+            store.close(try XCTUnwrap(store.tab(split)))
+            XCTAssertNotEqual(first.selectedTabID, favorite.id)
+            XCTAssertEqual(second.selectedTabID, favorite.id)
+        }
+    }
+
+    @MainActor
+    func testBulkArchiveAndPersistedLegacyOrderAreDeterministic() throws {
+        try withStore { store, root in
+            let space = store.currentSpaceID
+            let keep = BrowserTab(spaceID: space, kind: .today, title: "Keep", urlString: "about:blank")
+            let a = BrowserTab(spaceID: space, kind: .today, title: "A", urlString: "about:blank")
+            let b = BrowserTab(spaceID: space, kind: .today, title: "B", urlString: "about:blank")
+            store.tabs = [keep, a, b]
+            store.closeOtherTabs(keeping: keep)
+            let archived = store.archived
+            XCTAssertEqual(Set(archived.map(\.id)), Set([a.id, b.id]))
+            let expected = try XCTUnwrap(archived.first?.id)
+            store.restoreMostRecentArchived()
+            XCTAssertFalse(try XCTUnwrap(store.tab(expected)).isArchived)
+
+            var legacy = a
+            legacy.isArchived = true
+            legacy.archivedAt = nil
+            legacy.lastVisitedAt = Date(timeIntervalSince1970: 100)
+            var tied = b
+            tied.isArchived = true
+            tied.archivedAt = Date(timeIntervalSince1970: 100)
+            store.tabs = [keep, legacy, tied]
+            XCTAssertTrue(store.flush())
+            let reopened = BrowserStore(stateURL: root.appendingPathComponent("state.json"))
+            let expectedOrder = [legacy.id, tied.id].sorted { $0.uuidString < $1.uuidString }
+            XCTAssertEqual(reopened.archived.map(\.id), expectedOrder)
+            reopened.restoreMostRecentArchived()
+            XCTAssertFalse(try XCTUnwrap(reopened.tab(expectedOrder[0])).isArchived)
+            XCTAssertTrue(try XCTUnwrap(reopened.tab(expectedOrder[1])).isArchived)
+        }
+    }
+
+    @MainActor
     func testAddressEditNavigatesFocusedSplitWithoutCollapsingIt() throws {
         try withStore { store, _ in
             store.newTab(urlString: "https://alpha.example")

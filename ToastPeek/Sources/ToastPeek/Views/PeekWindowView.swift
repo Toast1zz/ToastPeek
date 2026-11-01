@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Peek: a compact window for a quick look at a link. The page runs in a
 /// temporary tab that isn't in any Space until you open it in one — then it
@@ -7,6 +8,8 @@ struct PeekWindowView: View {
     let onClose: () -> Void
     let onMoveToSpace: (BrowserTab, UUID) -> Void
     @EnvironmentObject var store: BrowserStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @StateObject private var pageState = BrowserPageState()
     @State private var tab: BrowserTab
     @State private var editing: Bool
     @State private var address = ""
@@ -35,17 +38,38 @@ struct PeekWindowView: View {
                     // Click the page to fold the Space list back up.
                     if spaceMenuOpen {
                         Color.clear.contentShape(Rectangle())
-                            .onTapGesture { withAnimation(Self.unfold) { spaceMenuOpen = false } }
+                            .onTapGesture { withAnimation(reduceMotion ? nil : Self.unfold) { spaceMenuOpen = false } }
                     }
                 }
                 .padding([.horizontal, .bottom], 6)
+                .overlay(alignment: .topTrailing) {
+                    PageFindOverlay(state: pageState, tabID: tab.id).padding(8)
+                }
         }
         // One row with the traffic lights, like a compact bar, instead of a
         // title-bar row above the address bar.
         .ignoresSafeArea(.container, edges: .top)
         .background(SpaceBackdrop(color: store.currentSpace.color).ignoresSafeArea())
-        .onAppear { store.registerPeekTab(tab) }
+        .background(WindowAccessor { pageState.window = $0 })
+        .onAppear { store.registerPeekTab(tab, pageState: pageState) }
+        .onChange(of: pageState.addressFocusRequest) { beginAddressEditing() }
         .onDisappear { if !moved { store.discardPeekTab(tab.id) } }
+    }
+
+    private func beginAddressEditing() {
+        address = store.controller(forTabID: tab.id)?.currentURLString ?? liveTab.urlString
+        if address == "about:blank" { address = "" }
+        editing = true
+        addressFocused = true
+        selectAddress()
+    }
+
+    private func selectAddress() {
+        DispatchQueue.main.async {
+            guard addressFocused, let editor = pageState.window?.firstResponder as? NSTextView,
+                  editor.isFieldEditor else { return }
+            editor.selectAll(nil)
+        }
     }
 
     static let unfold = Animation.spring(response: 0.28, dampingFraction: 0.9)
@@ -69,14 +93,16 @@ struct PeekWindowView: View {
                             editing = false
                         }
                         .onExitCommand { editing = false }
-                        .onAppear { addressFocused = true }
+                        .onAppear { addressFocused = true; selectAddress() }
                 } else {
-                    Text(liveTab.displayHost.isEmpty ? "Peek" : liveTab.displayHost)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture { address = liveTab.urlString; editing = true }
-                        .accessibilityAddTraits(.isButton)
+                    Button(action: beginAddressEditing) {
+                        Text(liveTab.displayHost.isEmpty ? "Peek" : liveTab.displayHost)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Search or enter address")
                 }
             }
             .font(.system(size: 12.5))
@@ -87,9 +113,9 @@ struct PeekWindowView: View {
 
             OpenInSpaceButton(current: store.currentSpace, others: otherSpaces,
                               expanded: spaceMenuOpen,
-                              toggle: { withAnimation(Self.unfold) { spaceMenuOpen.toggle() } },
+                              toggle: { withAnimation(reduceMotion ? nil : Self.unfold) { spaceMenuOpen.toggle() } },
                               open: { spaceID in
-                                  withAnimation(Self.unfold) { spaceMenuOpen = false }
+                                  withAnimation(reduceMotion ? nil : Self.unfold) { spaceMenuOpen = false }
                                   moved = true
                                   onMoveToSpace(liveTab, spaceID)
                               })

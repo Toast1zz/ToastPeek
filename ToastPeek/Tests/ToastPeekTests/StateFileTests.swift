@@ -136,7 +136,7 @@ final class StateFileTests: XCTestCase {
         XCTAssertEqual(repaired.tabs[0].spaceID, repaired.currentSpaceID)
         XCTAssertNil(repaired.tabs[0].folderID)
         XCTAssertEqual(repaired.tabs[0].profileID, repaired.spaces[0].dataStoreID)
-        XCTAssertNotNil(repaired.tabs[0].archivedAt)
+        XCTAssertNil(repaired.tabs[0].archivedAt, "Legacy archives retain nil archivedAt so ordering falls back to persisted lastVisitedAt")
     }
 
     func testAmbiguousSpaceAndCookieIdentitiesAreRejected() throws {

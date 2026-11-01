@@ -38,6 +38,69 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
     }
     private var resumeData: [UUID: ResumeRecord] = [:]
     private var resumeOrder: [UUID] = []
+    private struct CommitInput: Sendable {
+        let id: UUID
+        let source: URL
+        let destination: URL
+        let replaceExisting: Bool
+    }
+    private let commitQueue = DispatchQueue(label: "com.toastpeek.download-commit", qos: .utility)
+    private var commitGroup = DispatchGroup()
+    private var committing: [UUID: Task] = [:]
+    private var completedFiles: [UUID: Task] = [:]
+    private var removedWhileCommitting = Set<UUID>()
+    private final class PendingResume {
+        enum Phase { case awaitingDownload, cancelling }
+        let id: UUID
+        let record: ResumeRecord
+        var phase = Phase.awaitingDownload
+        var cancellationRequested = false
+        var keepResumeData = true
+        var waiters: [() -> Void] = []
+        init(id: UUID, record: ResumeRecord) { self.id = id; self.record = record }
+    }
+    private var pendingResumes: [UUID: PendingResume] = [:]
+
+    // Narrow fault-injection seams: production still uses real WebKit and filesystem I/O.
+    var resumeCompletionGate: ((@escaping () -> Void) -> Void)?
+    var commitFile: @Sendable (URL, URL, Bool) throws -> Void = { source, destination, replace in
+        if replace { _ = try FileManager.default.replaceItemAt(destination, withItemAt: source) }
+        else { try FileManager.default.moveItem(at: source, to: destination) }
+    }
+
+    private func enqueueCommit(_ task: Task, completion: @escaping @MainActor @Sendable (Error?) -> Void) {
+        guard committing[task.id] == nil else { completion(CocoaError(.fileWriteFileExists)); return }
+        guard let source = task.transferURL, let destination = task.destination,
+              source.standardizedFileURL != destination.standardizedFileURL else {
+            completion(CocoaError(.fileNoSuchFile)); return
+        }
+        let input = CommitInput(id: task.id, source: source, destination: destination, replaceExisting: task.replaceExisting)
+        let commit = commitFile
+        committing[task.id] = task
+        commitGroup.enter()
+        commitQueue.async { [weak self] in
+            let staging = input.destination.deletingLastPathComponent().appendingPathComponent(".toastpeek-save-\(UUID()).partial")
+            let commitError: Error? = {
+                do {
+                    try FileManager.default.copyItem(at: input.source, to: staging)
+                    try commit(staging, input.destination, input.replaceExisting)
+                    return nil
+                } catch {
+                    return error
+                }
+            }()
+            try? FileManager.default.removeItem(at: staging)
+            DispatchQueue.main.async { [weak self, commitError] in
+                self?.committing.removeValue(forKey: input.id)
+                self?.commitGroup.leave()
+                completion(commitError)
+            }
+        }
+    }
+
+    private func awaitCommits(_ completion: @escaping @MainActor @Sendable () -> Void) {
+        commitGroup.notify(queue: .main, execute: completion)
+    }
 
     init(store: BrowserStore) { self.store = store }
 
@@ -55,9 +118,21 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
         tasks.values.first { $0.tabID == tabID && $0.panel != nil }?.panel
     }
 
-    func hasActiveDownloads(for tabID: UUID) -> Bool { tasks.values.contains { $0.tabID == tabID } }
+    func hasActiveDownloads(for tabID: UUID) -> Bool {
+        tasks.values.contains { $0.tabID == tabID } || pendingResumes.values.contains { $0.record.tabID == tabID }
+    }
+
+    private func cancelPending(_ pending: PendingResume, keepingResumeData: Bool, completion: @escaping () -> Void) {
+        pending.cancellationRequested = true
+        pending.keepResumeData = pending.keepResumeData && keepingResumeData
+        pending.waiters.append(completion)
+    }
 
     func cancel(_ id: UUID, keepingResumeData: Bool = true, completion: @escaping () -> Void = {}) {
+        if let pending = pendingResumes[id] {
+            cancelPending(pending, keepingResumeData: keepingResumeData, completion: completion)
+            return
+        }
         guard let task = tasks.values.first(where: { $0.id == id }) else { completion(); return }
         task.keepResumeData = task.keepResumeData && keepingResumeData
         task.cancelWaiters.append(completion)
@@ -77,24 +152,52 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
         }
     }
 
-    func cancelAll(keepingResumeData: Bool = true, completion: @escaping () -> Void = {}) {
+    func cancelAll(keepingResumeData: Bool = true, completion: @escaping @MainActor @Sendable () -> Void = {}) {
         if !keepingResumeData { for id in Array(resumeData.keys) { discardResume(id) } }
         let group = DispatchGroup()
+        for pending in pendingResumes.values {
+            group.enter()
+            cancelPending(pending, keepingResumeData: keepingResumeData) { group.leave() }
+        }
         for id in tasks.values.map(\.id) {
             group.enter()
             cancel(id, keepingResumeData: keepingResumeData) { group.leave() }
         }
-        group.notify(queue: .main, execute: completion)
+        group.notify(queue: .main) { [weak self] in
+            guard let self else { completion(); return }
+            self.awaitCommits { [weak self] in
+                guard let self else { completion(); return }
+                if !keepingResumeData {
+                    for task in self.completedFiles.values { self.removePartials(task) }
+                    self.completedFiles.removeAll()
+                }
+                completion()
+            }
+        }
     }
 
     func discardProfile(_ profileID: UUID, completion: @escaping @MainActor @Sendable () -> Void) {
         for id in resumeData.keys.filter({ resumeData[$0]?.profileID == profileID }) { discardResume(id) }
         let group = DispatchGroup()
+        for pending in pendingResumes.values where pending.record.profileID == profileID {
+            group.enter()
+            cancelPending(pending, keepingResumeData: false) { group.leave() }
+        }
         for id in tasks.values.filter({ $0.profileID == profileID }).map(\.id) {
             group.enter()
             cancel(id, keepingResumeData: false) { group.leave() }
         }
-        group.notify(queue: .main, execute: completion)
+        group.notify(queue: .main) { [weak self] in
+            guard let self else { completion(); return }
+            self.awaitCommits { [weak self] in
+                guard let self else { completion(); return }
+                for task in self.completedFiles.values.filter({ $0.profileID == profileID }) {
+                    self.removePartials(task)
+                    self.completedFiles.removeValue(forKey: task.id)
+                }
+                completion()
+            }
+        }
     }
 
     private func remember(_ data: Data, task: Task) {
@@ -117,34 +220,109 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
 
     func removeRecord(_ id: UUID) {
         discardResume(id)
+        if let pending = pendingResumes[id] { cancelPending(pending, keepingResumeData: false, completion: {}) }
+        if committing[id] != nil { removedWhileCommitting.insert(id) }
+        else if let task = completedFiles.removeValue(forKey: id) { removePartials(task) }
         store?.downloads.removeAll { $0.id == id }
     }
 
-    func canRetry(_ id: UUID) -> Bool { resumeData[id] != nil }
+    func canRetry(_ id: UUID) -> Bool { resumeData[id] != nil || completedFiles[id] != nil }
+    func canSaveCompleted(_ id: UUID) -> Bool { completedFiles[id] != nil }
+
+    /// Re-save a complete transfer; copy and commit run on the serial utility queue.
+    @discardableResult
+    func saveCompleted(_ id: UUID, to destination: URL, replacingExisting: Bool = false) -> Bool {
+        guard committing[id] == nil, !reservedPaths.contains(pathKey(destination)),
+              let task = completedFiles.removeValue(forKey: id) else { return false }
+        reservedPaths.insert(pathKey(destination))
+        task.destination = destination
+        task.replaceExisting = replacingExisting
+        enqueueCommit(task) { [weak self] error in
+            guard let self else { return }
+            self.reservedPaths.remove(self.pathKey(destination))
+            if self.removedWhileCommitting.remove(id) != nil {
+                self.removePartials(task)
+                return
+            }
+            if let error {
+                self.completedFiles[id] = task
+                self.publish(task, state: "failed", error: error)
+                self.store?.toast = error.localizedDescription
+            } else {
+                self.removePartials(task)
+                self.publish(task, state: "completed")
+            }
+        }
+        return true
+    }
 
     func retry(_ id: UUID) {
+        if let task = completedFiles[id], committing[id] == nil, let destination = task.destination {
+            let target = reserveDestination(folder: destination.deletingLastPathComponent(), suggestedFilename: destination.lastPathComponent)
+            reservedPaths.remove(pathKey(target))
+            _ = saveCompleted(id, to: target)
+            return
+        }
         guard let record = resumeData[id], let store, store.canLoadWebContent,
               store.spaces.contains(where: { $0.dataStoreID == record.profileID }) else { return }
         resumeData.removeValue(forKey: id)
         resumeOrder.removeAll { $0 == id }
+        let pending = PendingResume(id: id, record: record)
+        pendingResumes[id] = pending
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: record.profileID)
         let view = WKWebView(frame: .zero, configuration: configuration)
-        view.resumeDownload(fromResumeData: record.data) { [weak self, view] download in
-            _ = view // Retain the initiating view until WebKit transfers ownership.
-            guard let self else { download.cancel { _ in }; return }
-            self.adopt(download, from: record.tabID, profileID: record.profileID)
-            guard let task = self.tasks[ObjectIdentifier(download)] else { return }
-            // A resumed WKDownload already has its destination in the opaque
-            // resume data; it need not ask the delegate to choose one again.
-            task.destination = self.reserveDestination(folder: record.destination.deletingLastPathComponent(), suggestedFilename: record.destination.lastPathComponent)
-            task.transferURL = record.transfer
-            task.sourceURL = record.sourceURL
-            task.inheritedPartials = record.partials.filter { $0 != record.transfer }
-            self.observeProgress(task)
-            self.publish(task, state: "inProgress")
+        view.resumeDownload(fromResumeData: record.data) { [self, view] download in
+            _ = view // Keep both manager and view alive until the cancellation barrier settles.
+            let receive = { [self] in self.receiveResumed(download, pending: pending) }
+            if let gate = resumeCompletionGate { gate(receive) } else { receive() }
         }
         store.downloads.removeAll { $0.id == id }
+    }
+
+    private func receiveResumed(_ download: WKDownload, pending: PendingResume) {
+        let record = pending.record
+        guard pendingResumes[pending.id] === pending, pending.phase == .awaitingDownload else {
+            download.cancel { _ in }; return
+        }
+        let profileUsable = store?.canLoadWebContent == true &&
+            store?.spaces.contains(where: { $0.dataStoreID == record.profileID }) == true
+        if pending.cancellationRequested || !profileUsable {
+            pending.phase = .cancelling
+            download.cancel { [self] data in
+                _Concurrency.Task { @MainActor in
+                    if pending.keepResumeData, profileUsable, let data, data.count <= 2_000_000 {
+                        self.resumeData[pending.id] = ResumeRecord(data: data, tabID: record.tabID,
+                            profileID: record.profileID, sourceURL: record.sourceURL,
+                            destination: record.destination, transfer: record.transfer, partials: record.partials)
+                        self.resumeOrder.removeAll { $0 == pending.id }
+                        self.resumeOrder.append(pending.id)
+                        while self.resumeOrder.count > 8 { self.discardResume(self.resumeOrder[0]) }
+                        self.store?.upsertDownload(fromTab: record.tabID, DownloadItemState(id: pending.id,
+                            fileName: record.destination.lastPathComponent, urlString: record.sourceURL,
+                            fullPath: record.destination.path, percent: -1,
+                            receivedBytes: max(0, download.progress.completedUnitCount),
+                            totalBytes: max(0, download.progress.totalUnitCount), state: "cancelled"))
+                    } else {
+                        for url in record.partials { try? FileManager.default.removeItem(at: url) }
+                    }
+                    self.pendingResumes.removeValue(forKey: pending.id)
+                    pending.waiters.forEach { $0() }
+                    pending.waiters = []
+                }
+            }
+            return
+        }
+        // Removing the pending operation and adopting happen in one MainActor turn.
+        pendingResumes.removeValue(forKey: pending.id)
+        adopt(download, from: record.tabID, profileID: record.profileID)
+        guard let task = tasks[ObjectIdentifier(download)] else { return }
+        task.destination = reserveDestination(folder: record.destination.deletingLastPathComponent(), suggestedFilename: record.destination.lastPathComponent)
+        task.transferURL = record.transfer
+        task.sourceURL = record.sourceURL
+        task.inheritedPartials = record.partials.filter { $0 != record.transfer }
+        observeProgress(task)
+        publish(task, state: "inProgress")
     }
 
     private func pathKey(_ url: URL) -> String { url.standardizedFileURL.path.lowercased() }
@@ -232,25 +410,39 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
             receivedBytes: received, totalBytes: total, state: state, errorDescription: error?.localizedDescription))
     }
 
+    private func removePartials(_ task: Task) {
+        for source in task.inheritedPartials + (task.transferURL.map { [$0] } ?? []) {
+            try? FileManager.default.removeItem(at: source)
+        }
+    }
+
+
     private func finish(_ download: WKDownload, state: String, error: Error? = nil) {
         guard let task = tasks.removeValue(forKey: ObjectIdentifier(download)) else { return }
         task.observation = nil
-        if let dest = task.destination { reservedPaths.remove(pathKey(dest)) }
-        var finalState = state, finalError = error
-        if state == "completed", let source = task.transferURL, let destination = task.destination {
-            do {
-                if task.replaceExisting {
-                    _ = try FileManager.default.replaceItemAt(destination, withItemAt: source)
-                } else { try FileManager.default.moveItem(at: source, to: destination) }
-            } catch { finalState = "failed"; finalError = error }
-        }
-        if resumeData[task.id] == nil {
-            for source in task.inheritedPartials + (task.transferURL.map { [$0] } ?? []) {
-                try? FileManager.default.removeItem(at: source)
+        if state == "completed", task.transferURL != nil, task.destination != nil {
+            enqueueCommit(task) { [weak self] commitError in
+                guard let self else { return }
+                if let destination = task.destination { self.reservedPaths.remove(self.pathKey(destination)) }
+                if self.removedWhileCommitting.remove(task.id) != nil {
+                    self.removePartials(task)
+                    return
+                }
+                if let commitError {
+                    self.completedFiles[task.id] = task
+                    self.publish(task, state: "failed", error: commitError)
+                    self.store?.toast = commitError.localizedDescription
+                } else {
+                    self.removePartials(task)
+                    self.publish(task, state: "completed")
+                }
             }
+            return
         }
-        if finalState == "failed" { store?.toast = finalError?.localizedDescription ?? String(localized: "Download failed") }
-        publish(task, state: finalState, error: finalError)
+        if let dest = task.destination { reservedPaths.remove(pathKey(dest)) }
+        if resumeData[task.id] == nil { removePartials(task) }
+        if state == "failed" { store?.toast = error?.localizedDescription ?? String(localized: "Download failed") }
+        publish(task, state: state, error: error)
     }
 
     func downloadDidFinish(_ download: WKDownload) { finish(download, state: "completed") }
