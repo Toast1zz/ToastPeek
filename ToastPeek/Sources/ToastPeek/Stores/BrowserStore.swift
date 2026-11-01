@@ -1415,24 +1415,23 @@ final class BrowserStore: ObservableObject {
             downloadManager.discardProfile(id) { [weak self] in
                 BrowserDiagnostics.record(["event": "profile-downloads-cancelled", "profileID": id.uuidString])
                 WKWebsiteDataStore.remove(forIdentifier: id) { [weak self] error in
-                    BrowserDiagnostics.record(["event": "profile-delete-complete", "profileID": id.uuidString,
-                                               "errorCode": (error as NSError?)?.code ?? 0])
-                    guard let self else { return }
-                    self.deletingDataStores.remove(id)
-                    if let error {
-                        self.toast = error.localizedDescription
-                        // WebKit may still be releasing a just-closed view.
-                        // Retry a bounded burst, keeping the durable intent
-                        // for maintenance/next launch if removal still fails.
-                        if self.dataStoreDeletionAttempts[id, default: 0] <= 3 {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                                self?.retryPendingDataStoreDeletions()
+                    Task { @MainActor in
+                        BrowserDiagnostics.record(["event": "profile-delete-complete", "profileID": id.uuidString,
+                                                   "errorCode": (error as NSError?)?.code ?? 0])
+                        guard let self else { return }
+                        self.deletingDataStores.remove(id)
+                        if let error {
+                            self.toast = error.localizedDescription
+                            if self.dataStoreDeletionAttempts[id, default: 0] <= 3 {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                                    self?.retryPendingDataStoreDeletions()
+                                }
                             }
+                        } else {
+                            self.pendingDataStoreDeletions.remove(id)
+                            self.dataStoreDeletionAttempts.removeValue(forKey: id)
+                            self.scheduleSave()
                         }
-                    } else {
-                        self.pendingDataStoreDeletions.remove(id)
-                        self.dataStoreDeletionAttempts.removeValue(forKey: id)
-                        self.scheduleSave()
                     }
                 }
             }

@@ -1015,13 +1015,23 @@ final class WebTabController: NSObject, ObservableObject,
             completionHandler(response == .OK ? panel.urls : nil)
         }
     }
+#if compiler(>=6.3)
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
         let alert = NSAlert()
         alert.messageText = message
         alert.addButton(withTitle: String(localized: "OK"))
-        present(alert, completion: completionHandler)
+        present(alert) { completionHandler() }
     }
+#else
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @Sendable () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: String(localized: "OK"))
+        present(alert) { completionHandler() }
+    }
+#endif
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (Bool) -> Void) {
         let alert = NSAlert()
